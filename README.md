@@ -365,19 +365,3 @@ Hero image:     1600x900 or 1800x1000
 Phone mockups:  PNG or JPG
 File size:      Keep under 2 MB when possible
 ```
-
-## GitHub
-
-Remote repository:
-
-```text
-https://github.com/thkang091/Dutch.git
-```
-
-Commit and push:
-
-```bash
-git add -A
-git commit -m "Update README"
-git push
-```
