@@ -13,10 +13,13 @@ build/
 Config.xcconfig
 Secrets.xcconfig
 *.xcconfig
+!Dutchi/Config.Debug.xcconfig
+!Dutchi/Config.Release.xcconfig
 
 # CocoaPods
 Pods/
 Podfile.lock
+!Podfile.lock
 
 # macOS
 .DS_Store

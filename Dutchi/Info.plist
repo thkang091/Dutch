@@ -2,9 +2,27 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>TABSCANNER_API_KEY</key>
-	<string>$(TABSCANNER_API_KEY)</string>
-	<key>OPENAI_API_KEY</key>
-	<string>$(OPENAI_API_KEY)</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string></string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>app-1-570911778961-ios-a1cf13ea25a946e54af730</string>
+				<string>dutch</string>
+				<string>dutchie</string>
+			</array>
+		</dict>
+	</array>
+	<key>ReceiptParserAuthToken</key>
+	<string>skadnfla040121</string>
+	<key>ReceiptParserEndpoint</key>
+	<string>https://dutchie-dpij.onrender.com</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>fetch</string>
+		<string>remote-notification</string>
+	</array>
 </dict>
 </plist>

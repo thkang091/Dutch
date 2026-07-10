@@ -7,8 +7,16 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		D6909CA62F73161C004BA568 /* FirebaseAuth in Frameworks */ = {isa = PBXBuildFile; productRef = D6909CA52F73161C004BA568 /* FirebaseAuth */; };
+		D6909CA82F73161C004BA568 /* FirebaseAuthCombine-Community in Frameworks */ = {isa = PBXBuildFile; productRef = D6909CA72F73161C004BA568 /* FirebaseAuthCombine-Community */; };
+		D6909CC22F773319004BA568 /* FirebaseDatabase in Frameworks */ = {isa = PBXBuildFile; productRef = D6909CC12F773319004BA568 /* FirebaseDatabase */; };
+		D6909CC42F773319004BA568 /* FirebaseFirestore in Frameworks */ = {isa = PBXBuildFile; productRef = D6909CC32F773319004BA568 /* FirebaseFirestore */; };
+		D6909E1F2FA865AD004BA568 /* ReceiptParser in Frameworks */ = {isa = PBXBuildFile; productRef = D6909E1E2FA865AD004BA568 /* ReceiptParser */; };
+		D6909E212FA865AD004BA568 /* RevenueCat in Frameworks */ = {isa = PBXBuildFile; productRef = D6909E202FA865AD004BA568 /* RevenueCat */; };
+		D6909E232FA865AD004BA568 /* RevenueCatUI in Frameworks */ = {isa = PBXBuildFile; productRef = D6909E222FA865AD004BA568 /* RevenueCatUI */; };
 		D6AD9DD72F3119A700F4D7D2 /* Lottie in Frameworks */ = {isa = PBXBuildFile; productRef = D6AD9DD62F3119A700F4D7D2 /* Lottie */; };
 		D6F5A1282F479CCA0062748F /* DutchiShareExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = D6F5A11E2F479CCA0062748F /* DutchiShareExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		DA297FF2B20366943DDC4DA4 /* libPods-Dutchi.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 5809AC801698D84F6EDC2376 /* libPods-Dutchi.a */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -36,8 +44,11 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
-		D67AAC3D2F2C16E1009544ED /* Dutchi.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Dutchi.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		D6AD9EB82F311D3B00F4D7D2 /* Dutchi.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = Dutchi.xcodeproj; sourceTree = "<group>"; };
+		5809AC801698D84F6EDC2376 /* libPods-Dutchi.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-Dutchi.a"; sourceTree = BUILT_PRODUCTS_DIR; };
+		997D023D852841ECE59B6888 /* Pods-Dutchi.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Dutchi.release.xcconfig"; path = "Target Support Files/Pods-Dutchi/Pods-Dutchi.release.xcconfig"; sourceTree = "<group>"; };
+		B8DD0600B5CCDAC5F88F07C2 /* Pods-Dutchi.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Dutchi.debug.xcconfig"; path = "Target Support Files/Pods-Dutchi/Pods-Dutchi.debug.xcconfig"; sourceTree = "<group>"; };
+		D67AAC3D2F2C16E1009544ED /* Dutch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Dutch.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		D6AD9EB82F311D3B00F4D7D2 /* Dutch.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = Dutch.xcodeproj; sourceTree = "<group>"; };
 		D6F5A11E2F479CCA0062748F /* DutchiShareExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = DutchiShareExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -45,8 +56,12 @@
 		D689D9D62F577C4100F381D0 /* Exceptions for "Dutchi" folder in "Dutchi" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
+				Config.Debug.xcconfig,
+				Config.Release.xcconfig,
 				Config.xcconfig,
 				Info.plist,
+				Services/ReceiptPreprocessing/OpenCVReceiptProcessor.h,
+				Services/ReceiptPreprocessing/OpenCVReceiptProcessor.mm,
 			);
 			target = D67AAC3C2F2C16E1009544ED /* Dutchi */;
 		};
@@ -83,7 +98,15 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				D6909E1F2FA865AD004BA568 /* ReceiptParser in Frameworks */,
 				D6AD9DD72F3119A700F4D7D2 /* Lottie in Frameworks */,
+				D6909E212FA865AD004BA568 /* RevenueCat in Frameworks */,
+				D6909CA82F73161C004BA568 /* FirebaseAuthCombine-Community in Frameworks */,
+				D6909E232FA865AD004BA568 /* RevenueCatUI in Frameworks */,
+				D6909CC22F773319004BA568 /* FirebaseDatabase in Frameworks */,
+				D6909CC42F773319004BA568 /* FirebaseFirestore in Frameworks */,
+				D6909CA62F73161C004BA568 /* FirebaseAuth in Frameworks */,
+				DA297FF2B20366943DDC4DA4 /* libPods-Dutchi.a in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -97,19 +120,30 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		579F63BFBFF857F503F08F41 /* Pods */ = {
+			isa = PBXGroup;
+			children = (
+				B8DD0600B5CCDAC5F88F07C2 /* Pods-Dutchi.debug.xcconfig */,
+				997D023D852841ECE59B6888 /* Pods-Dutchi.release.xcconfig */,
+			);
+			path = Pods;
+			sourceTree = "<group>";
+		};
 		D67AAC342F2C16E1009544ED = {
 			isa = PBXGroup;
 			children = (
 				D67AAC3F2F2C16E1009544ED /* Dutchi */,
 				D6F5A11F2F479CCA0062748F /* DutchiShareExtension */,
 				D67AAC3E2F2C16E1009544ED /* Products */,
+				579F63BFBFF857F503F08F41 /* Pods */,
+				EF0174CB1E19A7ECE2EEC3B8 /* Frameworks */,
 			);
 			sourceTree = "<group>";
 		};
 		D67AAC3E2F2C16E1009544ED /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				D67AAC3D2F2C16E1009544ED /* Dutchi.app */,
+				D67AAC3D2F2C16E1009544ED /* Dutch.app */,
 				D6F5A11E2F479CCA0062748F /* DutchiShareExtension.appex */,
 			);
 			name = Products;
@@ -122,6 +156,14 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
+		EF0174CB1E19A7ECE2EEC3B8 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				5809AC801698D84F6EDC2376 /* libPods-Dutchi.a */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -129,6 +171,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = D67AAC482F2C16E3009544ED /* Build configuration list for PBXNativeTarget "Dutchi" */;
 			buildPhases = (
+				99A7BC2EB6BED2BB63627773 /* [CP] Check Pods Manifest.lock */,
 				D67AAC392F2C16E1009544ED /* Sources */,
 				D67AAC3A2F2C16E1009544ED /* Frameworks */,
 				D67AAC3B2F2C16E1009544ED /* Resources */,
@@ -145,9 +188,16 @@
 			name = Dutchi;
 			packageProductDependencies = (
 				D6AD9DD62F3119A700F4D7D2 /* Lottie */,
+				D6909CA52F73161C004BA568 /* FirebaseAuth */,
+				D6909CA72F73161C004BA568 /* FirebaseAuthCombine-Community */,
+				D6909CC12F773319004BA568 /* FirebaseDatabase */,
+				D6909CC32F773319004BA568 /* FirebaseFirestore */,
+				D6909E1E2FA865AD004BA568 /* ReceiptParser */,
+				D6909E202FA865AD004BA568 /* RevenueCat */,
+				D6909E222FA865AD004BA568 /* RevenueCatUI */,
 			);
-			productName = Dutchi;
-			productReference = D67AAC3D2F2C16E1009544ED /* Dutchi.app */;
+				productName = Dutch;
+				productReference = D67AAC3D2F2C16E1009544ED /* Dutch.app */;
 			productType = "com.apple.product-type.application";
 		};
 		D6F5A11D2F479CCA0062748F /* DutchiShareExtension */ = {
@@ -199,6 +249,8 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				D6AD9DD52F3119A700F4D7D2 /* XCRemoteSwiftPackageReference "lottie-ios" */,
+				D6909CA42F73161C004BA568 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */,
+				D6909E1D2FA865AD004BA568 /* XCRemoteSwiftPackageReference "purchases-ios-spm" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = D67AAC3E2F2C16E1009544ED /* Products */;
@@ -206,7 +258,7 @@
 			projectReferences = (
 				{
 					ProductGroup = D6AD9EBA2F311D3B00F4D7D2 /* Products */;
-					ProjectRef = D6AD9EB82F311D3B00F4D7D2 /* Dutchi.xcodeproj */;
+					ProjectRef = D6AD9EB82F311D3B00F4D7D2 /* Dutch.xcodeproj */;
 				},
 			);
 			projectRoot = "";
@@ -233,6 +285,31 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		99A7BC2EB6BED2BB63627773 /* [CP] Check Pods Manifest.lock */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"${PODS_PODFILE_DIR_PATH}/Podfile.lock",
+				"${PODS_ROOT}/Manifest.lock",
+			);
+			name = "[CP] Check Pods Manifest.lock";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/Pods-Dutchi-checkManifestLockResult.txt",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		D67AAC392F2C16E1009544ED /* Sources */ = {
@@ -381,8 +458,7 @@
 		};
 		D67AAC492F2C16E3009544ED /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReferenceAnchor = D67AAC3F2F2C16E1009544ED /* Dutchi */;
-			baseConfigurationReferenceRelativePath = Config.xcconfig;
+			baseConfigurationReference = B8DD0600B5CCDAC5F88F07C2 /* Pods-Dutchi.debug.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -394,11 +470,15 @@
 				DEVELOPMENT_TEAM = G2N82UFFK6;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = arm64;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Dutchi/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Dutch;
 				INFOPLIST_KEY_LSApplicationCategoryType = "";
-				INFOPLIST_KEY_NSCameraUsageDescription = "";
-				INFOPLIST_KEY_NSContactsUsageDescription = "";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Dutch uses the camera to scan receipts you choose to split.";
+				INFOPLIST_KEY_NSContactsUsageDescription = "Dutch uses contacts only when you choose people to split with.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Dutch can save QR codes or receipt images to your photo library when you choose to export them.";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Dutch uses selected photos only when you choose receipt or statement images to split.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -410,12 +490,13 @@
 				);
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.taehoonkang.Dutchi;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = Dutch;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "Dutchi/Dutchi-Bridging-Header.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -424,6 +505,7 @@
 		};
 		D67AAC4A2F2C16E3009544ED /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 997D023D852841ECE59B6888 /* Pods-Dutchi.release.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -435,11 +517,15 @@
 				DEVELOPMENT_TEAM = G2N82UFFK6;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = arm64;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Dutchi/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Dutch;
 				INFOPLIST_KEY_LSApplicationCategoryType = "";
-				INFOPLIST_KEY_NSCameraUsageDescription = "";
-				INFOPLIST_KEY_NSContactsUsageDescription = "";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Dutch uses the camera to scan receipts you choose to split.";
+				INFOPLIST_KEY_NSContactsUsageDescription = "Dutch uses contacts only when you choose people to split with.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Dutch can save QR codes or receipt images to your photo library when you choose to export them.";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Dutch uses selected photos only when you choose receipt or statement images to split.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -451,12 +537,13 @@
 				);
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.taehoonkang.Dutchi;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = Dutch;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "Dutchi/Dutchi-Bridging-Header.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -556,6 +643,22 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		D6909CA42F73161C004BA568 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/firebase/firebase-ios-sdk.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 12.11.0;
+			};
+		};
+		D6909E1D2FA865AD004BA568 /* XCRemoteSwiftPackageReference "purchases-ios-spm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/RevenueCat/purchases-ios-spm.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 5.70.0;
+			};
+		};
 		D6AD9DD52F3119A700F4D7D2 /* XCRemoteSwiftPackageReference "lottie-ios" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/airbnb/lottie-ios.git";
@@ -567,6 +670,41 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		D6909CA52F73161C004BA568 /* FirebaseAuth */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D6909CA42F73161C004BA568 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseAuth;
+		};
+		D6909CA72F73161C004BA568 /* FirebaseAuthCombine-Community */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D6909CA42F73161C004BA568 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = "FirebaseAuthCombine-Community";
+		};
+		D6909CC12F773319004BA568 /* FirebaseDatabase */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D6909CA42F73161C004BA568 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseDatabase;
+		};
+		D6909CC32F773319004BA568 /* FirebaseFirestore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D6909CA42F73161C004BA568 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseFirestore;
+		};
+		D6909E1E2FA865AD004BA568 /* ReceiptParser */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D6909E1D2FA865AD004BA568 /* XCRemoteSwiftPackageReference "purchases-ios-spm" */;
+			productName = ReceiptParser;
+		};
+		D6909E202FA865AD004BA568 /* RevenueCat */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D6909E1D2FA865AD004BA568 /* XCRemoteSwiftPackageReference "purchases-ios-spm" */;
+			productName = RevenueCat;
+		};
+		D6909E222FA865AD004BA568 /* RevenueCatUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D6909E1D2FA865AD004BA568 /* XCRemoteSwiftPackageReference "purchases-ios-spm" */;
+			productName = RevenueCatUI;
+		};
 		D6AD9DD62F3119A700F4D7D2 /* Lottie */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = D6AD9DD52F3119A700F4D7D2 /* XCRemoteSwiftPackageReference "lottie-ios" */;

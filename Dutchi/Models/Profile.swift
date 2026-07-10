@@ -232,6 +232,9 @@ struct SplitRecord: Identifiable, Codable {
     let transactionCount: Int
     let settlements: [SettlementSnapshot]
     let yourBalance: Double
+    let groupID: UUID?
+    let groupName: String?
+    let transactions: [TransactionSnapshot]?
 
     init(
         id: UUID = UUID(),
@@ -240,7 +243,10 @@ struct SplitRecord: Identifiable, Codable {
         participantCount: Int,
         transactionCount: Int,
         settlements: [SettlementSnapshot],
-        yourBalance: Double
+        yourBalance: Double,
+        groupID: UUID? = nil,
+        groupName: String? = nil,
+        transactions: [TransactionSnapshot]? = nil
     ) {
         self.id = id
         self.date = date
@@ -249,6 +255,9 @@ struct SplitRecord: Identifiable, Codable {
         self.transactionCount = transactionCount
         self.settlements = settlements
         self.yourBalance = yourBalance
+        self.groupID = groupID
+        self.groupName = groupName
+        self.transactions = transactions
     }
 
     var formattedTotal: String {
@@ -277,7 +286,7 @@ struct SplitRecord: Identifiable, Codable {
             .sorted { $0.id.uuidString < $1.id.uuidString }
             .map { "\($0.fromName)-\($0.toName)-\($0.amount)" }
             .joined(separator: "|")
-        return "\(totalAmount)-\(participantCount)-\(transactionCount)-\(settlementHash)"
+        return "\(totalAmount)-\(participantCount)-\(transactionCount)-\(groupID?.uuidString ?? "local")-\(settlementHash)"
     }
 }
 

@@ -1,0 +1,102 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+
+    "verifiedUsers": {
+      "$uid": {
+        ".read": "auth != null && auth.uid == $uid",
+        ".write": "auth != null && auth.uid == $uid"
+      }
+    },
+
+    "verifiedUsersByPhone": {
+      ".read": "auth != null",
+      "$phoneKey": {
+        ".write": "auth != null && (!data.exists() || data.child('uid').val() == auth.uid || newData.child('uid').val() == auth.uid || !newData.exists())"
+      }
+    },
+
+    "members": {
+      ".read": "auth != null",
+      ".indexOn": ["name", "phoneKey", "uid"],
+      "$phoneKey": {
+        ".write": "auth != null && (!data.exists() || data.child('uid').val() == auth.uid || newData.child('uid').val() == auth.uid || !newData.exists())"
+      }
+    },
+
+    "subscriptionMemberships": {
+      "$uid": {
+        ".read": "auth != null && auth.uid == $uid",
+        ".write": "auth != null && auth.uid == $uid"
+      }
+    },
+
+    "subscriptions": {
+      ".read": "auth != null",
+      ".indexOn": ["groupID", "uid", "status"],
+      "$subscriptionId": {
+        ".write": "auth != null && ($subscriptionId == auth.uid || data.child('uid').val() == auth.uid || newData.child('uid').val() == auth.uid || data.child('members').child(auth.uid).exists() || newData.child('members').child(auth.uid).exists())",
+        ".validate": "!newData.exists() || !newData.child('subscriptionMemberLimit').exists() || (newData.child('subscriptionMemberLimit').isNumber() && newData.child('subscriptionMemberLimit').val() >= 1 && newData.child('subscriptionMemberLimit').val() <= 8)",
+        "members": {
+          "$uid": {
+            ".write": "auth != null && (auth.uid == $uid || root.child('subscriptions').child($subscriptionId).child('uid').val() == auth.uid || root.child('subscriptions').child($subscriptionId).child('members').child(auth.uid).child('isOwner').val() == true)"
+          }
+        }
+      }
+    },
+
+    "groups": {
+      ".read": "auth != null",
+      ".write": "auth != null",
+      ".indexOn": ["active", "createdByID", "isArchived", "isSubscriptionInviteStaging"],
+      "$groupId": {
+        ".validate": "!newData.exists() || !newData.child('maxMemberCount').exists() || newData.child('maxMemberCount').val() <= 8"
+      }
+    },
+
+    "receipts": {
+      ".read": "auth != null",
+      ".write": "auth != null",
+      ".indexOn": ["groupID", "expiresAt", "createdByID"]
+    },
+
+    "paymentRequests": {
+      ".read": "auth != null",
+      ".write": "auth != null",
+      ".indexOn": ["status", "receiptId", "toPhone", "fromPhone", "createdAt"]
+    },
+
+    "userBalances": {
+      "$uid": {
+        ".read": "auth != null && auth.uid == $uid",
+        ".write": "auth != null",
+        ".indexOn": ["status", "createdAt", "updatedAt", "receiptId"]
+      }
+    },
+
+    "userBalancesByPhone": {
+      "$phoneKey": {
+        ".read": "auth != null && (root.child('members').child($phoneKey).child('uid').val() == auth.uid || root.child('verifiedUsersByPhone').child($phoneKey).child('uid').val() == auth.uid)",
+        ".write": "auth != null",
+        ".indexOn": ["status", "createdAt", "updatedAt", "receiptId"]
+      }
+    },
+
+    "groupActivity": {
+      "$groupId": {
+        ".read": "auth != null",
+        ".write": "auth != null",
+        ".indexOn": ["timestamp", "type", "receiptBatchID"]
+      }
+    },
+
+    "userActivity": {
+      "$phoneKey": {
+        ".read": "auth != null",
+        ".write": "auth != null",
+        ".indexOn": ["timestamp", "type", "receiptBatchID"]
+      }
+    }
+  }
+}

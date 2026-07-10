@@ -47,7 +47,7 @@ A clean, black and white SwiftUI app for splitting bills with friends.
 ```
 Dutchie/
 ├── App/
-│   ├── DutchieApp.swift      # Main app entry
+│   ├── DutchApp.swift        # Main app entry
 │   ├── AppState.swift         # Global state management
 │   └── Router.swift           # Navigation logic
 ├── Models/
@@ -169,10 +169,3 @@ If you're getting "No such module 'UIKit'" or "Cannot find UIImage" errors:
 - Contacts Framework
 - PhotosUI
 - Share Sheet
-
-## Notes
-
-- All data is stored locally
-- OCR processing happens on-device
-- Contact access is optional
-- Payment method sharing is opt-in

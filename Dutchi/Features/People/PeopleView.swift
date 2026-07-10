@@ -2,6 +2,400 @@ import SwiftUI
 import Contacts
 import ContactsUI
 
+// MARK: - Dutch Custom Icons
+
+/// Two standing figures — circle head, trapezoidal body, shared ground line.
+/// Filled = active, outlined = inactive.
+struct GroupIcon: View {
+    var size: CGFloat = 22
+    var filled: Bool = false
+    private let ink = Color(red: 0.15, green: 0.15, blue: 0.15)
+
+    var body: some View {
+        Canvas { ctx, s in
+            let w = s.width, h = s.height
+            let strokeW: CGFloat = 1.5
+
+            func drawFigure(cx: CGFloat, headY: CGFloat, scale: CGFloat) {
+                // Head
+                let headR = w * 0.115 * scale
+                let headRect = CGRect(x: cx - headR, y: headY, width: headR * 2, height: headR * 2)
+                var headPath = Path(ellipseIn: headRect)
+                if filled {
+                    ctx.fill(headPath, with: .color(ink))
+                } else {
+                    ctx.stroke(headPath, with: .color(ink), lineWidth: strokeW)
+                }
+
+                // Body trapezoid
+                let bodyTop    = headY + headR * 2 + h * 0.03
+                let bodyBottom = h * 0.82
+                let bodyTopW   = headR * 1.4 * scale
+                let bodyBotW   = headR * 2.0 * scale
+                var bodyPath   = Path()
+                bodyPath.move(to:    CGPoint(x: cx - bodyTopW, y: bodyTop))
+                bodyPath.addLine(to: CGPoint(x: cx + bodyTopW, y: bodyTop))
+                bodyPath.addLine(to: CGPoint(x: cx + bodyBotW, y: bodyBottom))
+                bodyPath.addLine(to: CGPoint(x: cx - bodyBotW, y: bodyBottom))
+                bodyPath.closeSubpath()
+                if filled {
+                    ctx.fill(bodyPath, with: .color(ink))
+                } else {
+                    ctx.stroke(bodyPath, with: .color(ink), lineWidth: strokeW)
+                }
+            }
+
+            // Back-left figure (slightly smaller, offset left)
+            drawFigure(cx: w * 0.32, headY: h * 0.08, scale: 0.85)
+            // Front-right figure (slightly smaller, offset right)
+            drawFigure(cx: w * 0.68, headY: h * 0.08, scale: 0.85)
+
+            // Ground line
+            var ground = Path()
+            ground.move(to:    CGPoint(x: w * 0.08, y: h * 0.88))
+            ground.addLine(to: CGPoint(x: w * 0.92, y: h * 0.88))
+            ctx.stroke(ground, with: .color(ink), lineWidth: strokeW)
+        }
+        .frame(width: size, height: size)
+    }
+}
+
+/// Single standing figure — circle head, trapezoid body.
+struct PersonIcon: View {
+    var size: CGFloat = 20
+    var filled: Bool = false
+    private let ink = Color(red: 0.15, green: 0.15, blue: 0.15)
+
+    var body: some View {
+        Canvas { ctx, s in
+            let w = s.width, h = s.height
+            let sw: CGFloat = 1.5
+            let cx = w / 2
+
+            // Head
+            let headR = w * 0.18
+            let headY = h * 0.06
+            let headRect = CGRect(x: cx - headR, y: headY, width: headR * 2, height: headR * 2)
+            let headPath = Path(ellipseIn: headRect)
+            if filled {
+                ctx.fill(headPath, with: .color(ink))
+            } else {
+                ctx.stroke(headPath, with: .color(ink), lineWidth: sw)
+            }
+
+            // Body
+            let bodyTop    = headY + headR * 2 + h * 0.04
+            let bodyBottom = h * 0.88
+            let topW       = headR * 1.3
+            let botW       = headR * 2.0
+            var body = Path()
+            body.move(to:    CGPoint(x: cx - topW, y: bodyTop))
+            body.addLine(to: CGPoint(x: cx + topW, y: bodyTop))
+            body.addLine(to: CGPoint(x: cx + botW, y: bodyBottom))
+            body.addLine(to: CGPoint(x: cx - botW, y: bodyBottom))
+            body.closeSubpath()
+            if filled {
+                ctx.fill(body, with: .color(ink))
+            } else {
+                ctx.stroke(body, with: .color(ink), lineWidth: sw)
+            }
+        }
+        .frame(width: size, height: size)
+    }
+}
+
+/// Clock icon — circle outline, two hands (hour short, minute long).
+struct ClockIcon: View {
+    var size: CGFloat = 20
+    private let ink = Color(red: 0.15, green: 0.15, blue: 0.15)
+
+    var body: some View {
+        Canvas { ctx, s in
+            let w = s.width, h = s.height
+            let sw: CGFloat = 1.5
+            let cx = w / 2, cy = h / 2
+            let r  = min(w, h) / 2 - sw
+
+            // Outer ring
+            let ring = Path(ellipseIn: CGRect(x: cx - r, y: cy - r, width: r * 2, height: r * 2))
+            ctx.stroke(ring, with: .color(ink), lineWidth: sw)
+
+            // Minute hand (pointing up-right ~12:10)
+            var min = Path()
+            min.move(to: CGPoint(x: cx, y: cy))
+            min.addLine(to: CGPoint(x: cx + r * 0.35, y: cy - r * 0.55))
+            ctx.stroke(min, with: .color(ink), lineWidth: sw)
+
+            // Hour hand (pointing up ~12:00)
+            var hour = Path()
+            hour.move(to: CGPoint(x: cx, y: cy))
+            hour.addLine(to: CGPoint(x: cx, y: cy - r * 0.5))
+            ctx.stroke(hour, with: .color(ink), lineWidth: sw)
+
+            // Center dot
+            let dot = Path(ellipseIn: CGRect(x: cx - 1.5, y: cy - 1.5, width: 3, height: 3))
+            ctx.fill(dot, with: .color(ink))
+        }
+        .frame(width: size, height: size)
+    }
+}
+
+/// Chevron pointing right.
+struct ChevronRightIcon: View {
+    var size: CGFloat = 14
+    private let ink = Color(red: 0.15, green: 0.15, blue: 0.15)
+
+    var body: some View {
+        Canvas { ctx, s in
+            let w = s.width, h = s.height
+            var p = Path()
+            p.move(to:    CGPoint(x: w * 0.3, y: h * 0.2))
+            p.addLine(to: CGPoint(x: w * 0.7, y: h * 0.5))
+            p.addLine(to: CGPoint(x: w * 0.3, y: h * 0.8))
+            ctx.stroke(p, with: .color(ink.opacity(0.5)), lineWidth: 1.5)
+        }
+        .frame(width: size, height: size)
+    }
+}
+
+/// Chevron pointing left.
+struct ChevronLeftIcon: View {
+    var size: CGFloat = 18
+    private let ink = Color(red: 0.15, green: 0.15, blue: 0.15)
+
+    var body: some View {
+        Canvas { ctx, s in
+            let w = s.width, h = s.height
+            var p = Path()
+            p.move(to:    CGPoint(x: w * 0.65, y: h * 0.2))
+            p.addLine(to: CGPoint(x: w * 0.3,  y: h * 0.5))
+            p.addLine(to: CGPoint(x: w * 0.65, y: h * 0.8))
+            ctx.stroke(p, with: .color(ink), lineWidth: 1.8)
+        }
+        .frame(width: size, height: size)
+    }
+}
+
+/// Chevron pointing up.
+struct ChevronUpIcon: View {
+    var size: CGFloat = 14
+    private let ink = Color(red: 0.15, green: 0.15, blue: 0.15)
+
+    var body: some View {
+        Canvas { ctx, s in
+            let w = s.width, h = s.height
+            var p = Path()
+            p.move(to:    CGPoint(x: w * 0.2, y: h * 0.65))
+            p.addLine(to: CGPoint(x: w * 0.5, y: h * 0.3))
+            p.addLine(to: CGPoint(x: w * 0.8, y: h * 0.65))
+            ctx.stroke(p, with: .color(ink.opacity(0.5)), lineWidth: 1.5)
+        }
+        .frame(width: size, height: size)
+    }
+}
+
+/// Chevron pointing down.
+struct ChevronDownIcon: View {
+    var size: CGFloat = 14
+    private let ink = Color(red: 0.15, green: 0.15, blue: 0.15)
+
+    var body: some View {
+        Canvas { ctx, s in
+            let w = s.width, h = s.height
+            var p = Path()
+            p.move(to:    CGPoint(x: w * 0.2, y: h * 0.35))
+            p.addLine(to: CGPoint(x: w * 0.5, y: h * 0.7))
+            p.addLine(to: CGPoint(x: w * 0.8, y: h * 0.35))
+            ctx.stroke(p, with: .color(ink.opacity(0.5)), lineWidth: 1.5)
+        }
+        .frame(width: size, height: size)
+    }
+}
+
+/// Plus symbol — two perpendicular bars.
+struct PlusIcon: View {
+    var size: CGFloat = 20
+    var color: Color = Color(red: 0.15, green: 0.15, blue: 0.15)
+
+    var body: some View {
+        Canvas { ctx, s in
+            let w = s.width, h = s.height
+            let sw: CGFloat = 2.0
+            var horiz = Path()
+            horiz.move(to:    CGPoint(x: w * 0.2, y: h * 0.5))
+            horiz.addLine(to: CGPoint(x: w * 0.8, y: h * 0.5))
+            ctx.stroke(horiz, with: .color(color), lineWidth: sw)
+
+            var vert = Path()
+            vert.move(to:    CGPoint(x: w * 0.5, y: h * 0.2))
+            vert.addLine(to: CGPoint(x: w * 0.5, y: h * 0.8))
+            ctx.stroke(vert, with: .color(color), lineWidth: sw)
+        }
+        .frame(width: size, height: size)
+    }
+}
+
+/// X / close icon — two diagonal lines crossing.
+struct XMarkIcon: View {
+    var size: CGFloat = 14
+    private let ink = Color(red: 0.15, green: 0.15, blue: 0.15)
+
+    var body: some View {
+        Canvas { ctx, s in
+            let w = s.width, h = s.height
+            let sw: CGFloat = 1.5
+            let pad: CGFloat = 0.22
+            var d1 = Path()
+            d1.move(to:    CGPoint(x: w * pad,       y: h * pad))
+            d1.addLine(to: CGPoint(x: w * (1 - pad), y: h * (1 - pad)))
+            ctx.stroke(d1, with: .color(ink.opacity(0.5)), lineWidth: sw)
+
+            var d2 = Path()
+            d2.move(to:    CGPoint(x: w * (1 - pad), y: h * pad))
+            d2.addLine(to: CGPoint(x: w * pad,       y: h * (1 - pad)))
+            ctx.stroke(d2, with: .color(ink.opacity(0.5)), lineWidth: sw)
+        }
+        .frame(width: size, height: size)
+    }
+}
+
+/// Arrow pointing right — horizontal shaft + arrowhead.
+struct ArrowRightIcon: View {
+    var size: CGFloat = 16
+    var color: Color = .white
+
+    var body: some View {
+        Canvas { ctx, s in
+            let w = s.width, h = s.height
+            let sw: CGFloat = 1.8
+            // Shaft
+            var shaft = Path()
+            shaft.move(to:    CGPoint(x: w * 0.12, y: h * 0.5))
+            shaft.addLine(to: CGPoint(x: w * 0.78, y: h * 0.5))
+            ctx.stroke(shaft, with: .color(color), lineWidth: sw)
+            // Head
+            var head = Path()
+            head.move(to:    CGPoint(x: w * 0.55, y: h * 0.22))
+            head.addLine(to: CGPoint(x: w * 0.88, y: h * 0.5))
+            head.addLine(to: CGPoint(x: w * 0.55, y: h * 0.78))
+            ctx.stroke(head, with: .color(color), lineWidth: sw)
+        }
+        .frame(width: size, height: size)
+    }
+}
+
+/// Three horizontal lines at different lengths (ellipsis / more options).
+struct EllipsisIcon: View {
+    var size: CGFloat = 16
+    private let ink = Color(red: 0.15, green: 0.15, blue: 0.15)
+
+    var body: some View {
+        Canvas { ctx, s in
+            let w = s.width, h = s.height
+            let r: CGFloat = w * 0.09
+            let cy = h / 2
+            let positions: [CGFloat] = [w * 0.22, w * 0.5, w * 0.78]
+            for cx in positions {
+                let dot = Path(ellipseIn: CGRect(x: cx - r, y: cy - r, width: r * 2, height: r * 2))
+                ctx.fill(dot, with: .color(ink.opacity(0.5)))
+            }
+        }
+        .frame(width: size, height: size)
+    }
+}
+
+/// Phone receiver — small rectangle outline with a diagonal notch.
+struct PhoneIcon: View {
+    var size: CGFloat = 12
+    private let ink = Color(red: 0.15, green: 0.15, blue: 0.15)
+
+    var body: some View {
+        Canvas { ctx, s in
+            let w = s.width, h = s.height
+            let sw: CGFloat = 1.5
+            // Simplified: tall rounded rect + small line for earpiece
+            let rect = CGRect(x: w * 0.2, y: h * 0.08, width: w * 0.6, height: h * 0.84)
+            var body = Path(roundedRect: rect, cornerRadius: 2)
+            ctx.stroke(body, with: .color(ink.opacity(0.5)), lineWidth: sw)
+            // Earpiece bar
+            var ear = Path()
+            ear.move(to:    CGPoint(x: w * 0.38, y: h * 0.18))
+            ear.addLine(to: CGPoint(x: w * 0.62, y: h * 0.18))
+            ctx.stroke(ear, with: .color(ink.opacity(0.5)), lineWidth: sw)
+        }
+        .frame(width: size, height: size)
+    }
+}
+
+/// Checkmark circle — filled circle + white checkmark inside (for ADDED badge).
+struct CheckmarkCircleIcon: View {
+    var size: CGFloat = 14
+    var color: Color = Color(red: 0.15, green: 0.15, blue: 0.15)
+
+    var body: some View {
+        Canvas { ctx, s in
+            let w = s.width, h = s.height
+            // Filled circle
+            let circle = Path(ellipseIn: CGRect(x: 1, y: 1, width: w - 2, height: h - 2))
+            ctx.fill(circle, with: .color(color))
+            // Checkmark
+            var check = Path()
+            check.move(to:    CGPoint(x: w * 0.28, y: h * 0.52))
+            check.addLine(to: CGPoint(x: w * 0.45, y: h * 0.68))
+            check.addLine(to: CGPoint(x: w * 0.72, y: h * 0.35))
+            ctx.stroke(check, with: .color(.white), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+        }
+        .frame(width: size, height: size)
+    }
+}
+
+/// Magnifying glass — circle + angled handle line.
+struct MagnifyingGlassIcon: View {
+    var size: CGFloat = 18
+    private let ink = Color(red: 0.15, green: 0.15, blue: 0.15)
+
+    var body: some View {
+        Canvas { ctx, s in
+            let w = s.width, h = s.height
+            let sw: CGFloat = 1.5
+            let r = min(w, h) * 0.3
+            let cx = w * 0.4, cy = h * 0.4
+            let lens = Path(ellipseIn: CGRect(x: cx - r, y: cy - r, width: r * 2, height: r * 2))
+            ctx.stroke(lens, with: .color(ink.opacity(0.6)), lineWidth: sw)
+            var handle = Path()
+            handle.move(to:    CGPoint(x: cx + r * 0.7, y: cy + r * 0.7))
+            handle.addLine(to: CGPoint(x: w * 0.85,     y: h * 0.85))
+            ctx.stroke(handle, with: .color(ink.opacity(0.6)), lineWidth: sw)
+        }
+        .frame(width: size, height: size)
+    }
+}
+
+/// X inside a circle — used for "clear search".
+struct XCircleIcon: View {
+    var size: CGFloat = 18
+    private let ink = Color(red: 0.15, green: 0.15, blue: 0.15)
+
+    var body: some View {
+        Canvas { ctx, s in
+            let w = s.width, h = s.height
+            let sw: CGFloat = 1.5
+            let circle = Path(ellipseIn: CGRect(x: 1, y: 1, width: w - 2, height: h - 2))
+            ctx.stroke(circle, with: .color(ink.opacity(0.4)), lineWidth: sw)
+            let pad: CGFloat = 0.3
+            var d1 = Path()
+            d1.move(to:    CGPoint(x: w * pad,       y: h * pad))
+            d1.addLine(to: CGPoint(x: w * (1 - pad), y: h * (1 - pad)))
+            ctx.stroke(d1, with: .color(ink.opacity(0.4)), lineWidth: sw)
+            var d2 = Path()
+            d2.move(to:    CGPoint(x: w * (1 - pad), y: h * pad))
+            d2.addLine(to: CGPoint(x: w * pad,       y: h * (1 - pad)))
+            ctx.stroke(d2, with: .color(ink.opacity(0.4)), lineWidth: sw)
+        }
+        .frame(width: size, height: size)
+    }
+}
+
 // MARK: - Persistence Manager
 
 class PeopleStorageManager {
@@ -38,6 +432,7 @@ class PeopleStorageManager {
         var groups = loadSavedGroups()
         groups.removeAll { $0.id == group.id }
         groups.insert(group, at: 0)
+        groups = Array(groups.prefix(5))
         if let encoded = try? JSONEncoder().encode(groups) {
             UserDefaults.standard.set(encoded, forKey: savedGroupsKey)
         }
@@ -55,6 +450,8 @@ class PeopleStorageManager {
         var groups = loadSavedGroups()
         if let index = groups.firstIndex(where: { $0.id == id }) {
             groups[index].lastUsed = Date()
+            groups = groups.sorted { $0.lastUsed > $1.lastUsed }
+            groups = Array(groups.prefix(5))
             if let encoded = try? JSONEncoder().encode(groups) {
                 UserDefaults.standard.set(encoded, forKey: savedGroupsKey)
             }
@@ -102,366 +499,167 @@ struct PersistedGroup: Codable, Identifiable {
     var memberNames: [String] { members.map(\.name) }
 }
 
-// MARK: - Inline Group Row with chip selection
+// MARK: - GroupRow
 
 struct GroupRow: View {
     let group: PersistedGroup
-    let onConfirm: (Set<String>) -> Void
+    let onActivate: () -> Void
     let onDelete: () -> Void
 
-    @State private var isExpanded: Bool = false
-    @State private var selected: Set<String>
-    @State private var swipeOffset: CGFloat = 0
     @State private var showingDeleteConfirm = false
-
-    // How far the row slides to reveal the delete button
-    private let deleteButtonWidth: CGFloat = 80
-
-    init(group: PersistedGroup, onConfirm: @escaping (Set<String>) -> Void, onDelete: @escaping () -> Void) {
-        self.group     = group
-        self.onConfirm = onConfirm
-        self.onDelete  = onDelete
-        _selected      = State(initialValue: Set(group.members.map(\.name)))
-    }
-
-    private var allSelected: Bool { selected.count == group.members.count }
+    
+    private let ivory = Color(red: 1.0, green: 0.992, blue: 0.969)
+    private let ink = Color(red: 0.15, green: 0.15, blue: 0.15)
+    private let chalk = Color(red: 0.96, green: 0.96, blue: 0.94)
+    private let cardRadius: CGFloat = 8
 
     var body: some View {
-        ZStack(alignment: .trailing) {
-            // Delete button revealed on swipe (only shown when collapsed)
-            if !isExpanded {
-                deleteRevealButton
-            }
+        Button(action: {
+            HapticManager.impact(style: .medium)
+            onActivate()
+        }) {
+            HStack(spacing: 14) {
+                ZStack {
+                    Circle()
+                        .fill(Color.white)
+                        .frame(width: 36, height: 36)
+                    // Custom group/people icon
+                    GroupIcon(size: 18, filled: false)
+                }
 
-            // Main card
-            mainCard
-                .offset(x: isExpanded ? 0 : swipeOffset)
-                .gesture(
-                    isExpanded ? nil : DragGesture(minimumDistance: 15, coordinateSpace: .local)
-                        .onChanged { value in
-                            // Only allow left swipe
-                            if value.translation.width < 0 {
-                                swipeOffset = max(value.translation.width, -deleteButtonWidth)
-                            } else if swipeOffset < 0 {
-                                swipeOffset = min(0, swipeOffset + value.translation.width)
-                            }
-                        }
-                        .onEnded { value in
-                            withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
-                                if value.translation.width < -(deleteButtonWidth * 0.5) {
-                                    swipeOffset = -deleteButtonWidth
-                                } else {
-                                    swipeOffset = 0
-                                }
-                            }
-                        }
-                )
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(group.name)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(ink)
+                    Text("\(group.members.count) people")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.secondary)
+                }
+
+                Spacer()
+
+                HStack(spacing: -8) {
+                    ForEach(Array(group.members.prefix(3).enumerated()), id: \.element.id) { index, member in
+                        AvatarView(
+                            imageData: member.imageData,
+                            initials: String(member.name.prefix(2).uppercased()),
+                            size: 28
+                        )
+                        .overlay(Circle().stroke(ivory, lineWidth: 2))
+                        .zIndex(Double(3 - index))
+                    }
+                }
+
+                Button(action: {
+                    HapticManager.notification(type: .warning)
+                    showingDeleteConfirm = true
+                }) {
+                    // Custom ellipsis (three dots)
+                    EllipsisIcon(size: 20)
+                        .frame(width: 32, height: 32)
+                }
+                .buttonStyle(PlainButtonStyle())
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
         }
-        .clipped()
-        .cornerRadius(16)
-        .overlay(
-            RoundedRectangle(cornerRadius: 16)
-                .stroke(
-                    isExpanded ? Color.accentColor.opacity(0.3) : Color.primary.opacity(0.08),
-                    lineWidth: isExpanded ? 1.5 : 1
-                )
-        )
-        .shadow(color: Color.primary.opacity(0.05), radius: 8, y: 3)
+        .buttonStyle(ScaleButtonStyle(scale: 0.98))
         .alert("Remove Group", isPresented: $showingDeleteConfirm) {
             Button("Remove", role: .destructive) { onDelete() }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Remove \"\(group.name)\" from your quick groups?")
         }
-        // Reset swipe when something else taps
-        .onChange(of: isExpanded) { expanded in
-            if expanded {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
-                    swipeOffset = 0
-                }
-            }
-        }
-    }
-
-    // MARK: - Delete reveal button (swipe target)
-
-    private var deleteRevealButton: some View {
-        Button(action: {
-            HapticManager.notification(type: .warning)
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
-                swipeOffset = 0
-            }
-            showingDeleteConfirm = true
-        }) {
-            VStack(spacing: 6) {
-                Image(systemName: "trash.fill")
-                    .font(.system(size: 18, weight: .semibold))
-                Text("Delete")
-                    .font(.system(size: 11, weight: .semibold))
-            }
-            .foregroundColor(.white)
-            .frame(width: deleteButtonWidth)
-            .frame(maxHeight: .infinity)
-            .background(Color.red)
-        }
-        .buttonStyle(PlainButtonStyle())
-    }
-
-    // MARK: - Main card content
-
-    private var mainCard: some View {
-        VStack(spacing: 0) {
-            // Header row — tap to expand/collapse
-            Button(action: {
-                HapticManager.impact(style: .light)
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                    isExpanded.toggle()
-                    if isExpanded {
-                        selected = Set(group.members.map(\.name))
-                    }
-                }
-            }) {
-                HStack(spacing: 14) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 12)
-                            .fill(Color.primary.opacity(0.08))
-                            .frame(width: 46, height: 46)
-
-                        Image(systemName: "person.3.fill")
-                            .font(.system(size: 17))
-                            .foregroundColor(.primary.opacity(0.6))
-                    }
-
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(group.name)
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundColor(.primary)
-
-                        Text("\(group.members.count) people")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(.secondary)
-                    }
-
-                    Spacer()
-
-                    // Stacked avatar preview (up to 3)
-                    avatarStack
-
-                    if !isExpanded {
-                        // Swipe hint label when collapsed
-                        Text("Swipe to delete")
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundColor(.secondary.opacity(0.6))
-                    }
-
-                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(.secondary)
-                        .padding(.leading, 4)
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 14)
-            }
-            .buttonStyle(ScaleButtonStyle(scale: 0.99))
-            // Tapping the header resets any open swipe
-            .simultaneousGesture(
-                TapGesture().onEnded {
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
-                        swipeOffset = 0
-                    }
-                }
-            )
-
-            // Expanded chip area
-            if isExpanded {
-                VStack(spacing: 14) {
-                    Divider()
-                        .padding(.horizontal, 14)
-
-                    // Select all / deselect all row
-                    HStack {
-                        Text("\(selected.count) of \(group.members.count) selected")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(.secondary)
-
-                        Spacer()
-
-                        Button(action: {
-                            HapticManager.impact(style: .light)
-                            withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
-                                if allSelected {
-                                    selected.removeAll()
-                                } else {
-                                    selected = Set(group.members.map(\.name))
-                                }
-                            }
-                        }) {
-                            Text(allSelected ? "Deselect All" : "Select All")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundColor(.accentColor)
-                        }
-                    }
-                    .padding(.horizontal, 14)
-
-                    // Chips
-                    chipGrid
-
-                    // Action row: Delete Group + Add People
-                    HStack(spacing: 10) {
-                        // Prominent Delete Group button
-                        Button(action: {
-                            HapticManager.notification(type: .warning)
-                            showingDeleteConfirm = true
-                        }) {
-                            HStack(spacing: 6) {
-                                Image(systemName: "trash.fill")
-                                    .font(.system(size: 13, weight: .semibold))
-                                Text("Delete Group")
-                                    .font(.system(size: 14, weight: .semibold))
-                            }
-                            .foregroundColor(.red)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 13)
-                            .background(Color.red.opacity(0.1))
-                            .cornerRadius(12)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 12)
-                                    .stroke(Color.red.opacity(0.25), lineWidth: 1.5)
-                            )
-                        }
-                        .buttonStyle(ScaleButtonStyle(scale: 0.96))
-
-                        // Confirm / Add button
-                        Button(action: {
-                            guard !selected.isEmpty else { return }
-                            HapticManager.impact(style: .medium)
-                            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                                isExpanded = false
-                            }
-                            onConfirm(selected)
-                        }) {
-                            HStack(spacing: 6) {
-                                Text(
-                                    selected.isEmpty
-                                        ? "Select someone"
-                                        : "Add \(selected.count)"
-                                )
-                                .font(.system(size: 14, weight: .semibold))
-
-                                if !selected.isEmpty {
-                                    Image(systemName: "arrow.right")
-                                        .font(.system(size: 12, weight: .bold))
-                                }
-                            }
-                            .foregroundColor(.white)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 13)
-                            .background(selected.isEmpty ? Color.primary.opacity(0.25) : Color.accentColor)
-                            .cornerRadius(12)
-                            .shadow(
-                                color: selected.isEmpty ? Color.clear : Color.accentColor.opacity(0.3),
-                                radius: 8, y: 3
-                            )
-                        }
-                        .disabled(selected.isEmpty)
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.bottom, 14)
-                }
-                .transition(.opacity.combined(with: .move(edge: .top)))
-            }
-        }
-        .background(Color(.secondarySystemBackground))
-    }
-
-    // Small stacked avatars shown in collapsed state
-    private var avatarStack: some View {
-        let preview = Array(group.members.prefix(3))
-        return HStack(spacing: -8) {
-            ForEach(Array(preview.enumerated()), id: \.element.id) { index, member in
-                AvatarView(
-                    imageData: member.imageData,
-                    initials: String(member.name.prefix(2).uppercased()),
-                    size: 28
-                )
-                .overlay(Circle().stroke(Color(.systemBackground), lineWidth: 2))
-                .zIndex(Double(preview.count - index))
-            }
-        }
-    }
-
-    // Scrollable chip row
-    private var chipGrid: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 10) {
-                ForEach(group.members) { member in
-                    memberChip(member: member)
-                }
-            }
-            .padding(.horizontal, 14)
-        }
-    }
-
-    private func memberChip(member: PersistedGroupMember) -> some View {
-        let isSelected = selected.contains(member.name)
-        let firstName  = member.name.components(separatedBy: " ").first ?? member.name
-
-        return Button(action: {
-            HapticManager.impact(style: .light)
-            withAnimation(.spring(response: 0.25, dampingFraction: 0.75)) {
-                if isSelected {
-                    selected.remove(member.name)
-                } else {
-                    selected.insert(member.name)
-                }
-            }
-        }) {
-            VStack(spacing: 6) {
-                ZStack(alignment: .topTrailing) {
-                    AvatarView(
-                        imageData: member.imageData,
-                        initials: String(member.name.prefix(2).uppercased()),
-                        size: 52
-                    )
-                    .overlay(
-                        Circle()
-                            .stroke(
-                                isSelected ? Color.accentColor : Color.primary.opacity(0.1),
-                                lineWidth: isSelected ? 2.5 : 1.5
-                            )
-                    )
-
-                    // Checkmark badge
-                    ZStack {
-                        Circle()
-                            .fill(isSelected ? Color.accentColor : Color(.systemBackground))
-                            .frame(width: 18, height: 18)
-                            .overlay(Circle().stroke(Color.primary.opacity(0.15), lineWidth: 1))
-
-                        if isSelected {
-                            Image(systemName: "checkmark")
-                                .font(.system(size: 9, weight: .bold))
-                                .foregroundColor(.white)
-                        }
-                    }
-                    .offset(x: 2, y: -2)
-                }
-
-                Text(firstName)
-                    .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
-                    .foregroundColor(isSelected ? .primary : .secondary)
-                    .lineLimit(1)
-            }
-            .padding(.vertical, 4)
-            .padding(.horizontal, 2)
-            .opacity(isSelected ? 1.0 : 0.55)
-            .scaleEffect(isSelected ? 1.0 : 0.95)
-        }
-        .buttonStyle(ScaleButtonStyle(scale: 0.93))
     }
 }
 
-// MARK: - Main View
+// MARK: - GroupNameSheet
+
+struct GroupNameSheet: View {
+    @Binding var isPresented: Bool
+    let onConfirm: (String) -> Void
+    
+    @State private var groupName = ""
+    @Environment(\.colorScheme) var colorScheme
+    
+    private let ivory = Color(red: 1.0, green: 0.992, blue: 0.969)
+    private let ink = Color(red: 0.15, green: 0.15, blue: 0.15)
+    
+    var body: some View {
+        NavigationView {
+            ZStack {
+                ivory.ignoresSafeArea()
+                
+                VStack(spacing: 24) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Name Your Group")
+                            .font(.system(size: 20, weight: .bold))
+                            .foregroundColor(ink)
+                        
+                        Text("Give this group a memorable name")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    
+                    TextField("Enter group name", text: $groupName)
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundColor(ink)
+                        .padding(14)
+                        .background(Color.white)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 2)
+                                .stroke(ink.opacity(0.15), lineWidth: 1)
+                        )
+                        .cornerRadius(2)
+                        .submitLabel(.done)
+                        .onSubmit {
+                            if !groupName.isEmpty {
+                                confirmName()
+                            }
+                        }
+                    
+                    Spacer()
+                    
+                    Button(action: confirmName) {
+                        HStack(spacing: 6) {
+                            Text("Start Group Mode")
+                                .font(.system(size: 16, weight: .bold))
+                            // Custom arrow right icon
+                            ArrowRightIcon(size: 16, color: groupName.isEmpty ? Color.secondary : .white)
+                        }
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 16)
+                        .background(groupName.isEmpty ? Color.secondary.opacity(0.3) : ink)
+                        .cornerRadius(2)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    .disabled(groupName.isEmpty)
+                }
+                .padding(20)
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Cancel") {
+                        isPresented = false
+                    }
+                    .foregroundColor(ink)
+                }
+            }
+        }
+    }
+    
+    private func confirmName() {
+        guard !groupName.isEmpty else { return }
+        HapticManager.impact(style: .medium)
+        onConfirm(groupName)
+        isPresented = false
+    }
+}
+
+// MARK: - PeopleView
 
 struct PeopleView: View {
     @EnvironmentObject var appState: AppState
@@ -469,18 +667,27 @@ struct PeopleView: View {
     @EnvironmentObject var tutorialManager: TutorialManager
     @Environment(\.colorScheme) var colorScheme
 
-    @State private var newPersonName           = ""
-    @State private var showContactPicker       = false
-    @State private var showSaveGroupDialog     = false
-    @State private var groupName               = ""
-    @State private var recentPeople: [RecentPerson]  = []
+    @StateObject private var groupManager = GroupManager.shared
+
+    @State private var newPersonName = ""
+    @State private var showContactPicker = false
+    @State private var showSaveGroupDialog = false
+    @State private var groupName = ""
+    @State private var recentPeople: [RecentPerson] = []
     @State private var savedGroups: [PersistedGroup] = []
-    @State private var showDeleteGroupAlert    = false
-    @State private var groupToDelete: PersistedGroup?
-    @State private var recentPeopleExpanded    = false
-    @State private var savedGroupsExpanded     = false
+    @State private var recentPeopleExpanded = false
+    @State private var savedGroupsExpanded = false
+    @State private var showGroupModeNameSheet = false
+    @State private var pendingGroupName = ""
+    @State private var pendingGroupMembers: [GroupMember] = []
+    @State private var cachedSplitTotal: Double = 0
+    @FocusState private var isNameFieldFocused: Bool
 
     private let storage = PeopleStorageManager.shared
+    private let ivory = Color(red: 1.0, green: 0.992, blue: 0.969)
+    private let ink = Color(red: 0.15, green: 0.15, blue: 0.15)
+    private let chalk = Color(red: 0.96, green: 0.96, blue: 0.94)
+    private let cardRadius: CGFloat = 8
 
     private var shouldHighlightContactButton: Bool {
         tutorialManager.isActive && tutorialManager.currentStep?.targetView == .peopleAddContact
@@ -496,38 +703,48 @@ struct PeopleView: View {
         appState.people.filter { !$0.isCurrentUser }.count
     }
 
+    private var canContinue: Bool {
+        appState.people.count > 1
+    }
+
+    private var splitTotal: Double {
+        cachedSplitTotal
+    }
+
+    private var splitSubtitle: String {
+        if canContinue {
+            return "\(appState.people.count) included" + (splitTotal > 0 ? " · \(currencyString(splitTotal))" : "")
+        }
+        return "Add one person to continue"
+    }
+
     var body: some View {
         ZStack {
-            Color(.systemBackground).ignoresSafeArea()
+            ivory.ignoresSafeArea()
 
             VStack(spacing: 0) {
                 headerSection
 
                 ScrollView(.vertical, showsIndicators: false) {
-                    VStack(spacing: 24) {
-                        if addedPeopleCount > 0 {
-                            summaryCard
-                                .transition(.asymmetric(
-                                    insertion: .scale(scale: 0.9).combined(with: .opacity),
-                                    removal: .scale(scale: 0.9).combined(with: .opacity)
-                                ))
-                        }
-
+                    VStack(spacing: 0) {
+                        splitSummaryCard
                         addPeopleSection
 
                         if addedPeopleCount > 0 {
+                            sectionDivider
                             peopleListSection
                         }
 
                         if !recentPeople.isEmpty {
+                            sectionDivider
                             recentPeopleSection
                         }
 
                         if !savedGroups.isEmpty {
+                            sectionDivider
                             savedGroupsSection
                         }
                     }
-                    .padding(20)
                     .padding(.bottom, 120)
                 }
                 .disabled(tutorialManager.isActive)
@@ -542,10 +759,32 @@ struct PeopleView: View {
         .navigationBarBackButtonHidden(true)
         .onAppear {
             appState.ensureCurrentUser()
+            refreshSplitTotalCache()
             clearSessionPeople()
             loadPersistedData()
+            if !appState.forcePersonalSplitForCurrentUpload, groupManager.isGroupModeEnabled {
+                GroupManager.shared.syncMembersToAppState(appState)
+            }
+
             if tutorialManager.isActive && !tutorialManager.isCurrentStep(in: .people) {
                 withAnimation { tutorialManager.currentStepIndex = 3 }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .groupDidLeave)) { _ in
+            let currentUser = appState.people.first(where: { $0.isCurrentUser })
+                ?? Person(name: appState.profile.name, isCurrentUser: true)
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                appState.people = [currentUser]
+            }
+            recentPeople = storage.loadRecentPeople()
+            savedGroups = storage.loadSavedGroups()
+        }
+        .onChange(of: appState.transactions.count) { _, _ in
+            refreshSplitTotalCache()
+        }
+        .sheet(isPresented: $showGroupModeNameSheet) {
+            GroupNameSheet(isPresented: $showGroupModeNameSheet) { confirmedName in
+                launchGroupMode(name: confirmedName, members: pendingGroupMembers)
             }
         }
         .alert("Save Group", isPresented: $showSaveGroupDialog) {
@@ -560,32 +799,46 @@ struct PeopleView: View {
         } message: {
             Text("Save this group for quick access later")
         }
-        .alert("Remove Group", isPresented: $showDeleteGroupAlert) {
-            Button("Remove", role: .destructive) {
-                if let group = groupToDelete {
-                    withAnimation {
-                        storage.deleteGroup(id: group.id)
-                        savedGroups = storage.loadSavedGroups()
-                    }
-                }
+    }
+
+    // MARK: - Group Mode Launch
+
+    private func launchGroupMode(name: String, members: [GroupMember]) {
+        appState.forcePersonalSplitForCurrentUpload = false
+        let currentUser = appState.people.first(where: { $0.isCurrentUser })
+        var people: [Person] = [currentUser].compactMap { $0 }
+        for m in members where !m.isCurrentUser {
+            if !people.contains(where: { $0.name == m.name }) {
+                people.append(m.toPerson())
             }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This group will be removed from your quick groups list.")
         }
+        appState.people = people
+
+        groupManager.createFreshGroup(name: name, members: members)
+        groupManager.syncMembersToAppState(appState)
+
+        HapticManager.notification(type: .success)
     }
 
     // MARK: - Session & Persistence
 
     private func clearSessionPeople() {
         guard !tutorialManager.isActive else { return }
-        let currentUser = appState.people.first(where: { $0.isCurrentUser })
-        appState.people = [currentUser].compactMap { $0 }
+        if !appState.forcePersonalSplitForCurrentUpload, groupManager.isGroupModeEnabled {
+            groupManager.syncMembersToAppState(appState)
+        } else {
+            let currentUser = appState.people.first(where: { $0.isCurrentUser })
+            appState.people = [currentUser].compactMap { $0 }
+        }
     }
 
     private func loadPersistedData() {
         recentPeople = storage.loadRecentPeople()
-        savedGroups  = storage.loadSavedGroups()
+        savedGroups = storage.loadSavedGroups()
+    }
+
+    private func refreshSplitTotalCache() {
+        cachedSplitTotal = appState.transactions.reduce(0) { $0 + $1.amount }
     }
 
     private func saveCurrentGroup() {
@@ -602,24 +855,10 @@ struct PeopleView: View {
 
     private func recordRecentPeople(from people: [Person]) {
         for person in people where !person.isCurrentUser {
+            LocalContactNameStore.save(name: person.name, phoneNumber: person.phoneNumber, imageData: person.contactImage)
             storage.addRecentPerson(RecentPerson(name: person.name, phoneNumber: person.phoneNumber, imageData: person.contactImage))
         }
         recentPeople = storage.loadRecentPeople()
-    }
-
-    private func applySelectedMembers(_ selectedNames: Set<String>, from group: PersistedGroup) {
-        let currentUser = appState.people.first(where: { $0.isCurrentUser })
-        let toAdd = group.members
-            .filter { selectedNames.contains($0.name) }
-            .map { m -> Person in
-                let img = m.imageData ?? recentPeople.first(where: { $0.name == m.name })?.imageData
-                return Person(name: m.name, contactImage: img, phoneNumber: m.phoneNumber)
-            }
-        withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-            appState.people = [currentUser].compactMap { $0 } + toAdd.filter { !$0.isCurrentUser }
-        }
-        storage.updateGroupLastUsed(id: group.id)
-        savedGroups = storage.loadSavedGroups()
     }
 
     // MARK: - Header
@@ -631,23 +870,23 @@ struct PeopleView: View {
                     HapticManager.impact(style: .light)
                     router.navigateBack()
                 }) {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundColor(.primary)
-                        .frame(width: 40, height: 40)
-                        .background(Color(.secondarySystemBackground))
-                        .cornerRadius(12)
-                        .shadow(color: Color.primary.opacity(0.05), radius: 4, y: 2)
+                    ZStack {
+                        Rectangle()
+                            .fill(Color.clear)
+                            .frame(width: 40, height: 40)
+                        // Custom chevron left icon
+                        ChevronLeftIcon(size: 18)
+                    }
                 }
-                .buttonStyle(ScaleButtonStyle())
+                .buttonStyle(PlainButtonStyle())
                 .disabled(tutorialManager.isActive)
 
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 2) {
                     Text("Who's Splitting?")
-                        .font(.system(size: 24, weight: .bold))
-                        .foregroundColor(.primary)
-                    Text("Add people to split with")
-                        .font(.system(size: 14, weight: .medium))
+                        .font(.system(size: 22, weight: .bold))
+                        .foregroundColor(ink)
+                    Text(splitSubtitle)
+                        .font(.system(size: 13, weight: .medium))
                         .foregroundColor(.secondary)
                 }
 
@@ -655,191 +894,234 @@ struct PeopleView: View {
 
                 Button(action: {
                     HapticManager.impact(style: .light)
-                    router.showProfile = true
+                    router.presentProfile()
                 }) {
                     AvatarView(
                         imageData: appState.profile.avatarImage,
                         initials: appState.profile.initials,
-                        size: 44
+                        size: 40
                     )
-                    .overlay(Circle().stroke(Color.primary.opacity(0.1), lineWidth: 2))
-                    .shadow(color: Color.primary.opacity(0.1), radius: 8, y: 4)
+                    .overlay(Circle().stroke(ink, lineWidth: 1))
                 }
-                .buttonStyle(ScaleButtonStyle())
+                .buttonStyle(PlainButtonStyle())
                 .disabled(tutorialManager.isActive)
             }
             .padding(.horizontal, 20)
-            .padding(.top, 16)
-            .padding(.bottom, 16)
-            .background(Color(.systemBackground))
+            .padding(.top, 12)
+            .padding(.bottom, 12)
+            .background(ivory)
 
             Rectangle()
-                .fill(Color.primary.opacity(0.08))
+                .fill(ink.opacity(0.85))
                 .frame(height: 1)
+                .padding(.horizontal, 20)
         }
     }
 
-    // MARK: - Summary Card
+    private var splitSummaryCard: some View {
+        HStack(spacing: 12) {
+            summaryMetric(
+                title: "TOTAL",
+                value: splitTotal > 0 ? currencyString(splitTotal) : "--"
+            )
 
-    private var summaryCard: some View {
-        HStack(spacing: 16) {
-            ZStack {
-                Circle()
-                    .fill(Color.primary.opacity(0.08))
-                    .frame(width: 64, height: 64)
-                Image(systemName: "person.2.fill")
-                    .font(.system(size: 26))
-                    .foregroundColor(.primary.opacity(0.6))
+            Rectangle()
+                .fill(ink.opacity(0.16))
+                .frame(width: 1, height: 36)
+
+            summaryMetric(
+                title: "PEOPLE",
+                value: "\(appState.people.count)"
+            )
+
+            Rectangle()
+                .fill(ink.opacity(0.16))
+                .frame(width: 1, height: 36)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(canContinue ? "READY" : "NEEDS 1 MORE")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(canContinue ? Color(red: 0.18, green: 0.50, blue: 0.32) : ink.opacity(0.55))
+                    .tracking(1)
+                Text(canContinue ? "Split can start" : "Add someone")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(ink.opacity(0.70))
+                    .lineLimit(1)
             }
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("People Splitting")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(.secondary)
-                HStack(spacing: 8) {
-                    Text("\(appState.people.count)")
-                        .font(.system(size: 32, weight: .bold))
-                        .foregroundColor(.primary)
-                    Text("people")
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundColor(.secondary)
-                        .padding(.top, 10)
-                }
-            }
-
-            Spacer()
+            Spacer(minLength: 0)
         }
-        .padding(24)
-        .background(Color(.secondarySystemBackground))
-        .cornerRadius(20)
-        .shadow(color: Color.primary.opacity(0.06), radius: 12, y: 4)
+        .padding(14)
+        .background(chalk)
+        .overlay(
+            RoundedRectangle(cornerRadius: cardRadius)
+                .stroke(ink.opacity(0.22), lineWidth: 1.5)
+        )
+        .cornerRadius(cardRadius)
+        .padding(.horizontal, 20)
+        .padding(.top, 16)
+    }
+
+    private func summaryMetric(title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(.secondary)
+                .tracking(1)
+            Text(value)
+                .font(.system(size: 15, weight: .bold))
+                .foregroundColor(ink)
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+        }
+        .frame(minWidth: 68, alignment: .leading)
+    }
+
+    // MARK: - Section Divider
+    
+    private var sectionDivider: some View {
+        Rectangle()
+            .fill(ink.opacity(0.2))
+            .frame(height: 1)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 16)
     }
 
     // MARK: - Add People Section
 
     private var addPeopleSection: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            sectionHeader(title: "Add People", icon: "person.badge.plus")
-            VStack(spacing: 12) {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(spacing: 10) {
                 currentUserRow
                 addPersonInput
                 contactPickerButton
             }
+            .padding(.horizontal, 20)
+            .padding(.top, 16)
+            .padding(.bottom, 16)
         }
     }
 
     private var currentUserRow: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 12) {
             AvatarView(
                 imageData: appState.profile.avatarImage,
                 initials: appState.profile.initials,
-                size: 48
+                size: 44
             )
-            .overlay(Circle().stroke(Color.primary.opacity(0.1), lineWidth: 2))
+            .overlay(Circle().stroke(ink, lineWidth: 1))
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(appState.profile.name)
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundColor(.primary)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(ink)
                 Text("You")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 12, weight: .medium))
                     .foregroundColor(.secondary)
             }
 
             Spacer()
 
-            HStack(spacing: 6) {
-                Image(systemName: "checkmark.circle.fill").font(.system(size: 14))
-                Text("Added").font(.system(size: 13, weight: .semibold))
+            HStack(spacing: 5) {
+                CheckmarkCircleIcon(size: 12, color: ink)
+                Text("ADDED")
+                    .font(.system(size: 10, weight: .bold))
+                    .tracking(0.5)
             }
-            .foregroundColor(.green)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(Color.green.opacity(0.1))
-            .cornerRadius(12)
+            .foregroundColor(ink)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(ivory)
+            .overlay(
+                RoundedRectangle(cornerRadius: cardRadius)
+                    .stroke(ink.opacity(0.18), lineWidth: 1)
+            )
+            .cornerRadius(cardRadius)
         }
-        .padding(16)
-        .background(Color(.secondarySystemBackground))
-        .cornerRadius(16)
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.primary.opacity(0.08), lineWidth: 1))
-        .shadow(color: Color.primary.opacity(0.03), radius: 4, y: 2)
+        .padding(14)
+        .background(chalk)
+        .overlay(
+            RoundedRectangle(cornerRadius: cardRadius)
+                .stroke(ink, lineWidth: 1.5)
+        )
+        .cornerRadius(cardRadius)
     }
 
     private var addPersonInput: some View {
-        HStack(spacing: 12) {
-            HStack(spacing: 12) {
-                Image(systemName: "person.fill")
-                    .font(.system(size: 16))
-                    .foregroundColor(.secondary)
-
+        HStack(spacing: 0) {
+            HStack(spacing: 10) {
+                ZStack {
+                    Circle()
+                        .fill(ink.opacity(0.1))
+                        .frame(width: 24, height: 24)
+                    // Custom single person icon (filled = input has focus context)
+                    PersonIcon(size: 13, filled: true)
+                }
+                
                 TextField("Enter name", text: $newPersonName)
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundColor(.primary)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(ink)
                     .submitLabel(.done)
+                    .focused($isNameFieldFocused)
                     .disabled(tutorialManager.isActive)
                     .onSubmit { if !newPersonName.isEmpty { addPerson() } }
             }
-            .padding(16)
-            .background(Color(.secondarySystemBackground))
-            .cornerRadius(14)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.white)
             .overlay(
-                RoundedRectangle(cornerRadius: 14)
-                    .stroke(
-                        newPersonName.isEmpty ? Color.primary.opacity(0.1) : Color.primary.opacity(0.2),
-                        lineWidth: newPersonName.isEmpty ? 1 : 2
-                    )
+                Rectangle()
+                    .fill(ink.opacity(0.15))
+                    .frame(width: 1)
+                , alignment: .trailing
             )
 
             Button(action: {
                 HapticManager.impact(style: .medium)
                 addPerson()
             }) {
-                Image(systemName: "plus.circle.fill")
-                    .font(.system(size: 32))
-                    .foregroundColor(newPersonName.isEmpty ? .secondary : .white)
+                // Custom plus icon
+                PlusIcon(size: 20, color: newPersonName.isEmpty ? Color.secondary : .white)
                     .frame(width: 56, height: 56)
-                    .background(newPersonName.isEmpty ? Color.primary.opacity(0.08) : Color.accentColor)
-                    .cornerRadius(14)
-                    .shadow(color: newPersonName.isEmpty ? Color.clear : Color.accentColor.opacity(0.3), radius: 8, y: 4)
+                    .background(newPersonName.isEmpty ? Color.white : ink)
             }
-            .buttonStyle(ScaleButtonStyle(scale: 0.92))
+            .buttonStyle(PlainButtonStyle())
             .disabled(newPersonName.isEmpty || tutorialManager.isActive)
         }
+        .frame(height: 56)
+        .overlay(
+            RoundedRectangle(cornerRadius: cardRadius)
+                .stroke(ink, lineWidth: 1.5)
+        )
+        .cornerRadius(cardRadius)
     }
 
     private var contactPickerButton: some View {
         Button(action: {
             HapticManager.impact(style: .light)
+            dismissKeyboard()
             showContactPicker = true
         }) {
-            HStack(spacing: 12) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(Color.primary.opacity(0.05))
-                        .frame(width: 40, height: 40)
-                    Image(systemName: "person.crop.circle.badge.plus")
-                        .font(.system(size: 18))
-                        .foregroundColor(.primary.opacity(0.7))
-                }
-
+            HStack(spacing: 10) {
                 Text("Add from Contacts")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundColor(.primary)
-
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(ink)
                 Spacer()
-
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(.secondary)
+                // Custom chevron right icon
+                ChevronRightIcon(size: 14)
             }
-            .padding(16)
-            .background(Color(.secondarySystemBackground))
-            .cornerRadius(14)
-            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.1), lineWidth: 1.5))
-            .shadow(color: Color.primary.opacity(0.03), radius: 4, y: 2)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 14)
+            .background(chalk)
+            .overlay(
+                RoundedRectangle(cornerRadius: cardRadius)
+                    .stroke(ink, lineWidth: 1.5)
+            )
+            .cornerRadius(cardRadius)
         }
-        .buttonStyle(ScaleButtonStyle(scale: 0.98))
-        .tutorialSpotlight(isHighlighted: shouldHighlightContactButton, cornerRadius: 14)
+        .buttonStyle(PlainButtonStyle())
+        .tutorialSpotlight(isHighlighted: shouldHighlightContactButton, cornerRadius: cardRadius)
         .disabled(tutorialManager.isActive)
         .sheet(isPresented: $showContactPicker) {
             SearchableContactPickerView { contacts in
@@ -847,9 +1129,12 @@ struct PeopleView: View {
                 for contact in contacts {
                     let fullName = "\(contact.givenName) \(contact.familyName)".trimmingCharacters(in: .whitespaces)
                     if !fullName.isEmpty && !appState.people.contains(where: { $0.name == fullName }) {
-                        let phone  = contact.phoneNumbers.first?.value.stringValue
-                        let person = Person(name: fullName, contactImage: contact.imageData, phoneNumber: phone)
+                        let phone = contact.phoneNumbers.first?.value.stringValue
+                        let imageData = contact.dutchSafeImageData
+                        LocalContactNameStore.save(name: fullName, phoneNumber: phone, imageData: imageData)
+                        let person = Person(name: fullName, contactImage: imageData, phoneNumber: phone)
                         appState.addPerson(person)
+                        hydrateDutchMember(for: person)
                         newlyAdded.append(person)
                     }
                 }
@@ -858,7 +1143,7 @@ struct PeopleView: View {
         }
     }
 
-    // MARK: - Recent People Section (collapsible)
+    // MARK: - Recent People Section
 
     private var recentPeopleSection: some View {
         VStack(spacing: 0) {
@@ -868,20 +1153,19 @@ struct PeopleView: View {
                     recentPeopleExpanded.toggle()
                 }
             }) {
-                HStack(spacing: 14) {
+                HStack(spacing: 12) {
                     ZStack {
-                        RoundedRectangle(cornerRadius: 12)
-                            .fill(Color.primary.opacity(0.08))
-                            .frame(width: 46, height: 46)
-                        Image(systemName: "clock.fill")
-                            .font(.system(size: 17))
-                            .foregroundColor(.primary.opacity(0.6))
+                        Circle()
+                            .fill(Color.white)
+                            .frame(width: 24, height: 24)
+                        // Custom clock icon
+                        ClockIcon(size: 14)
                     }
 
-                    VStack(alignment: .leading, spacing: 3) {
+                    VStack(alignment: .leading, spacing: 2) {
                         Text("Recent People")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundColor(.primary)
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundColor(ink)
                         Text("\(recentPeople.count) people")
                             .font(.system(size: 12, weight: .medium))
                             .foregroundColor(.secondary)
@@ -896,49 +1180,51 @@ struct PeopleView: View {
                                 initials: String(person.name.prefix(2).uppercased()),
                                 size: 28
                             )
-                            .overlay(Circle().stroke(Color(.systemBackground), lineWidth: 2))
+                            .overlay(Circle().stroke(ivory, lineWidth: 2))
                             .zIndex(Double(3 - index))
                         }
                     }
 
-                    Image(systemName: recentPeopleExpanded ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(.secondary)
-                        .padding(.leading, 4)
+                    // Custom chevron up/down
+                    if recentPeopleExpanded {
+                        ChevronUpIcon(size: 14).padding(.leading, 4)
+                    } else {
+                        ChevronDownIcon(size: 14).padding(.leading, 4)
+                    }
                 }
-                .padding(.horizontal, 14)
+                .padding(.horizontal, 16)
                 .padding(.vertical, 14)
             }
-            .buttonStyle(ScaleButtonStyle(scale: 0.99))
+            .buttonStyle(PlainButtonStyle())
             .disabled(tutorialManager.isActive)
 
             if recentPeopleExpanded {
                 VStack(spacing: 0) {
-                    Divider().padding(.horizontal, 14)
-
+                    Rectangle()
+                        .fill(ink.opacity(0.2))
+                        .frame(height: 1)
+                        .padding(.horizontal, 16)
+                    
                     VStack(spacing: 8) {
                         ForEach(recentPeople) { person in
                             let alreadyAdded = appState.people.contains(where: { $0.name == person.name })
                             recentPersonRow(person: person, alreadyAdded: alreadyAdded)
                         }
                     }
-                    .padding(.horizontal, 14)
+                    .padding(.horizontal, 16)
                     .padding(.top, 12)
-                    .padding(.bottom, 14)
+                    .padding(.bottom, 16)
                 }
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
-        .background(Color(.secondarySystemBackground))
-        .cornerRadius(16)
+        .background(chalk)
         .overlay(
-            RoundedRectangle(cornerRadius: 16)
-                .stroke(
-                    recentPeopleExpanded ? Color.accentColor.opacity(0.3) : Color.primary.opacity(0.08),
-                    lineWidth: recentPeopleExpanded ? 1.5 : 1
-                )
+            RoundedRectangle(cornerRadius: cardRadius)
+                .stroke(ink, lineWidth: 1.5)
         )
-        .shadow(color: Color.primary.opacity(0.05), radius: 8, y: 3)
+        .cornerRadius(cardRadius)
+        .padding(.horizontal, 20)
     }
 
     private func recentPersonRow(person: RecentPerson, alreadyAdded: Bool) -> some View {
@@ -948,17 +1234,18 @@ struct PeopleView: View {
                 initials: String(person.name.prefix(2).uppercased()),
                 size: 40
             )
-            .overlay(Circle().stroke(Color.primary.opacity(0.1), lineWidth: 1.5))
+            .overlay(Circle().stroke(ink.opacity(0.15), lineWidth: 1))
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(person.name)
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundColor(.primary)
-
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(ink)
                 if let phone = person.phoneNumber, !phone.isEmpty {
                     HStack(spacing: 4) {
-                        Image(systemName: "phone.fill").font(.system(size: 10))
-                        Text(phone).font(.system(size: 12, weight: .medium))
+                        // Custom phone icon
+                        PhoneIcon(size: 10)
+                        Text(phone)
+                            .font(.system(size: 11, weight: .medium))
                     }
                     .foregroundColor(.secondary)
                 }
@@ -968,77 +1255,142 @@ struct PeopleView: View {
 
             if alreadyAdded {
                 HStack(spacing: 4) {
-                    Image(systemName: "checkmark.circle.fill").font(.system(size: 13))
-                    Text("Added").font(.system(size: 12, weight: .semibold))
+                    // Custom checkmark circle icon
+                    CheckmarkCircleIcon(size: 13, color: ink)
+                    Text("ADDED")
+                        .font(.system(size: 10, weight: .bold))
+                        .tracking(0.3)
                 }
-                .foregroundColor(.green)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(Color.green.opacity(0.1))
-                .cornerRadius(10)
+                .foregroundColor(ink)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(chalk)
+                .overlay(
+                    RoundedRectangle(cornerRadius: cardRadius)
+                        .stroke(ink.opacity(0.18), lineWidth: 1)
+                )
+                .cornerRadius(cardRadius)
             } else {
                 Button(action: {
                     HapticManager.impact(style: .medium)
                     withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
                         let newPerson = Person(name: person.name, contactImage: person.imageData, phoneNumber: person.phoneNumber)
                         appState.addPerson(newPerson)
+                        hydrateDutchMember(for: newPerson)
                     }
                 }) {
                     HStack(spacing: 4) {
-                        Image(systemName: "plus").font(.system(size: 12, weight: .bold))
-                        Text("Add").font(.system(size: 13, weight: .semibold))
+                        // Custom plus icon (small)
+                        PlusIcon(size: 12, color: .white)
+                        Text("ADD")
+                            .font(.system(size: 11, weight: .bold))
+                            .tracking(0.3)
                     }
                     .foregroundColor(.white)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(Color.accentColor)
-                    .cornerRadius(10)
-                    .shadow(color: Color.accentColor.opacity(0.3), radius: 6, y: 2)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(ink)
+                    .cornerRadius(cardRadius)
                 }
-                .buttonStyle(ScaleButtonStyle(scale: 0.94))
+                .buttonStyle(PlainButtonStyle())
                 .disabled(tutorialManager.isActive)
             }
         }
         .padding(12)
-        .background(Color(.tertiarySystemBackground))
-        .cornerRadius(12)
+        .background(ivory)
+        .overlay(
+            RoundedRectangle(cornerRadius: cardRadius)
+                .stroke(ink.opacity(0.1), lineWidth: 1)
+        )
+        .cornerRadius(cardRadius)
     }
 
     // MARK: - Added People Section
 
     private var peopleListSection: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            sectionHeader(title: "Added People", icon: "person.2.fill")
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(groupManager.isGroupModeEnabled ? "GROUP MEMBERS" : "ADDED PEOPLE")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(.secondary)
+                        .tracking(1.2)
+                    Text(groupManager.isGroupModeEnabled ? "Tap × to exclude someone from this split" : "\(addedPeopleCount) added to this split")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.secondary.opacity(0.7))
+                }
 
-            VStack(spacing: 10) {
+                Spacer()
+
+                if addedPeopleCount > 1 && !groupManager.isGroupModeEnabled {
+                    Button(action: {
+                        HapticManager.impact(style: .light)
+                        clearSessionPeople()
+                    }) {
+                        Text("CLEAR")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(ink.opacity(0.62))
+                            .tracking(1)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .stroke(ink.opacity(0.18), lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    .disabled(tutorialManager.isActive)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 12)
+
+            VStack(spacing: 8) {
                 ForEach(appState.people.filter { !$0.isCurrentUser }) { person in
                     personRow(person: person)
                 }
             }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 16)
         }
-        .tutorialSpotlight(isHighlighted: shouldHighlightPeopleList, cornerRadius: 16)
+        .tutorialSpotlight(isHighlighted: shouldHighlightPeopleList, cornerRadius: cardRadius)
     }
 
     private func personRow(person: Person) -> some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 12) {
             AvatarView(
                 imageData: person.contactImage,
                 initials: person.initials,
-                size: 48
+                size: 44
             )
-            .overlay(Circle().stroke(Color.primary.opacity(0.1), lineWidth: 2))
+            .overlay(Circle().stroke(ink, lineWidth: 1))
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(person.name)
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundColor(.primary)
-
-                if let phone = person.phoneNumber, !phone.isEmpty {
-                    HStack(spacing: 4) {
-                        Image(systemName: "phone.fill").font(.system(size: 10))
-                        Text("From contacts").font(.system(size: 12, weight: .medium))
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(ink)
+                HStack(spacing: 6) {
+                    if person.isDutchMember {
+                        Text("Member of Dutch")
+                            .font(.system(size: 10, weight: .bold))
+                            .tracking(0.4)
+                            .foregroundColor(Color(red: 0.18, green: 0.50, blue: 0.32))
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(Color(red: 0.18, green: 0.50, blue: 0.32).opacity(0.10))
+                            .cornerRadius(4)
+                    } else if person.phoneNumber != nil {
+                        Text("From contacts")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.secondary)
                     }
-                    .foregroundColor(.secondary)
+
+                    if person.hasPaymentMethods {
+                        Text("Pay ready")
+                            .font(.system(size: 10, weight: .bold))
+                            .tracking(0.4)
+                            .foregroundColor(ink.opacity(0.60))
+                    }
                 }
             }
 
@@ -1048,20 +1400,23 @@ struct PeopleView: View {
                 HapticManager.notification(type: .warning)
                 withAnimation(.spring(response: 0.3)) { appState.removePerson(person) }
             }) {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 24))
-                    .foregroundColor(.secondary)
+                // Custom X mark icon
+                XMarkIcon(size: 14)
+                    .frame(width: 32, height: 32)
             }
-            .buttonStyle(ScaleButtonStyle(scale: 0.9))
+            .buttonStyle(PlainButtonStyle())
             .disabled(tutorialManager.isActive)
         }
-        .padding(16)
-        .background(Color(.secondarySystemBackground))
-        .cornerRadius(14)
-        .shadow(color: Color.primary.opacity(0.04), radius: 6, y: 3)
+        .padding(14)
+        .background(chalk)
+        .overlay(
+            RoundedRectangle(cornerRadius: cardRadius)
+                .stroke(ink, lineWidth: 1.5)
+        )
+        .cornerRadius(cardRadius)
     }
 
-    // MARK: - Saved Groups Section (collapsible card)
+    // MARK: - Saved Groups Section
 
     private var savedGroupsSection: some View {
         VStack(spacing: 0) {
@@ -1071,20 +1426,19 @@ struct PeopleView: View {
                     savedGroupsExpanded.toggle()
                 }
             }) {
-                HStack(spacing: 14) {
+                HStack(spacing: 12) {
                     ZStack {
-                        RoundedRectangle(cornerRadius: 12)
-                            .fill(Color.primary.opacity(0.08))
-                            .frame(width: 46, height: 46)
-                        Image(systemName: "person.3.fill")
-                            .font(.system(size: 17))
-                            .foregroundColor(.primary.opacity(0.6))
+                        Circle()
+                            .fill(Color.white)
+                            .frame(width: 24, height: 24)
+                        // Custom group icon
+                        GroupIcon(size: 14, filled: false)
                     }
 
-                    VStack(alignment: .leading, spacing: 3) {
+                    VStack(alignment: .leading, spacing: 2) {
                         Text("Quick Groups")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundColor(.primary)
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundColor(ink)
                         Text("\(savedGroups.count) \(savedGroups.count == 1 ? "group" : "groups") saved")
                             .font(.system(size: 12, weight: .medium))
                             .foregroundColor(.secondary)
@@ -1100,47 +1454,55 @@ struct PeopleView: View {
                                     initials: String(member.name.prefix(2).uppercased()),
                                     size: 28
                                 )
-                                .overlay(Circle().stroke(Color(.systemBackground), lineWidth: 2))
+                                .overlay(Circle().stroke(ivory, lineWidth: 2))
                                 .zIndex(Double(3 - index))
                             }
                         }
                     }
 
-                    Image(systemName: savedGroupsExpanded ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(.secondary)
-                        .padding(.leading, 4)
+                    // Custom chevron up/down
+                    if savedGroupsExpanded {
+                        ChevronUpIcon(size: 14).padding(.leading, 4)
+                    } else {
+                        ChevronDownIcon(size: 14).padding(.leading, 4)
+                    }
                 }
-                .padding(.horizontal, 14)
+                .padding(.horizontal, 16)
                 .padding(.vertical, 14)
             }
-            .buttonStyle(ScaleButtonStyle(scale: 0.99))
+            .buttonStyle(PlainButtonStyle())
             .disabled(tutorialManager.isActive)
 
             if savedGroupsExpanded {
                 VStack(spacing: 0) {
-                    Divider().padding(.horizontal, 14)
+                    Rectangle()
+                        .fill(ink.opacity(0.2))
+                        .frame(height: 1)
+                        .padding(.horizontal, 16)
 
-                    // Swipe hint banner
-                    HStack(spacing: 6) {
-                        Image(systemName: "hand.point.left.fill")
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
-                        Text("Swipe left on a group to delete it")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 14)
-                    .padding(.top, 10)
-                    .padding(.bottom, 4)
-
-                    VStack(spacing: 10) {
-                        ForEach(savedGroups.prefix(5)) { group in
+                    VStack(spacing: 0) {
+                        ForEach(Array(savedGroups.enumerated()), id: \.element.id) { index, group in
+                            if index > 0 {
+                                Rectangle()
+                                    .fill(ink.opacity(0.2))
+                                    .frame(height: 1)
+                                    .padding(.leading, 56)
+                            }
                             GroupRow(
                                 group: group,
-                                onConfirm: { selectedNames in
-                                    applySelectedMembers(selectedNames, from: group)
+                                onActivate: {
+                                    let currentUser = appState.people.first(where: { $0.isCurrentUser })
+                                    let toAdd = group.members.map { m -> Person in
+                                        let img = m.imageData ?? recentPeople.first(where: { $0.name == m.name })?.imageData
+                                        return Person(name: m.name, contactImage: img, phoneNumber: m.phoneNumber)
+                                    }
+                                    withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                                        appState.people = [currentUser].compactMap { $0 } + toAdd.filter { !$0.isCurrentUser }
+                                    }
+                                    storage.updateGroupLastUsed(id: group.id)
+                                    savedGroups = storage.loadSavedGroups()
+                                    
+                                    HapticManager.notification(type: .success)
                                 },
                                 onDelete: {
                                     withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
@@ -1152,23 +1514,18 @@ struct PeopleView: View {
                             .disabled(tutorialManager.isActive)
                         }
                     }
-                    .padding(.horizontal, 14)
-                    .padding(.top, 4)
-                    .padding(.bottom, 14)
+                    .padding(.bottom, 4)
                 }
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
-        .background(Color(.secondarySystemBackground))
-        .cornerRadius(16)
+        .background(chalk)
         .overlay(
-            RoundedRectangle(cornerRadius: 16)
-                .stroke(
-                    savedGroupsExpanded ? Color.accentColor.opacity(0.3) : Color.primary.opacity(0.08),
-                    lineWidth: savedGroupsExpanded ? 1.5 : 1
-                )
+            RoundedRectangle(cornerRadius: cardRadius)
+                .stroke(ink, lineWidth: 1.5)
         )
-        .shadow(color: Color.primary.opacity(0.05), radius: 8, y: 3)
+        .cornerRadius(cardRadius)
+        .padding(.horizontal, 20)
     }
 
     // MARK: - Bottom CTA
@@ -1176,91 +1533,113 @@ struct PeopleView: View {
     private var bottomCTA: some View {
         VStack(spacing: 0) {
             Rectangle()
-                .fill(Color.primary.opacity(0.08))
+                .fill(ink.opacity(0.85))
                 .frame(height: 1)
+                .padding(.horizontal, 20)
 
-            VStack(spacing: 12) {
+            VStack(spacing: 10) {
                 if addedPeopleCount > 0 {
                     Button(action: {
                         HapticManager.impact(style: .light)
+                        dismissKeyboard()
                         showSaveGroupDialog = true
                     }) {
-                        HStack(spacing: 8) {
-                            Image(systemName: "star.fill").font(.system(size: 13))
-                            Text("Save as Quick Group").font(.system(size: 15, weight: .semibold))
-                        }
-                        .foregroundColor(.primary.opacity(0.7))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
-                        .background(Color(.secondarySystemBackground))
-                        .cornerRadius(14)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 14)
-                                .stroke(Color.primary.opacity(0.15), lineWidth: 1.5)
-                        )
+                        Text("Save as Quick Group")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(ink)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 13)
+                            .background(Color.white)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: cardRadius)
+                                    .stroke(ink.opacity(0.2), lineWidth: 1)
+                            )
+                            .cornerRadius(cardRadius)
                     }
-                    .buttonStyle(ScaleButtonStyle())
+                    .buttonStyle(PlainButtonStyle())
                     .disabled(tutorialManager.isActive)
                     .transition(.asymmetric(
-                        insertion: .scale(scale: 0.9).combined(with: .opacity),
-                        removal: .scale(scale: 0.9).combined(with: .opacity)
+                        insertion: .opacity,
+                        removal: .opacity
                     ))
                 }
 
                 Button(action: {
                     HapticManager.impact(style: .medium)
+                    dismissKeyboard()
                     recordRecentPeople(from: appState.people.filter { !$0.isCurrentUser })
                     router.navigateToProcessing()
                 }) {
-                    HStack(spacing: 8) {
-                        Text("Continue").font(.system(size: 17, weight: .semibold))
-                        Image(systemName: "arrow.right").font(.system(size: 14, weight: .bold))
+                    HStack(spacing: 6) {
+                        Text(canContinue ? "Continue with \(appState.people.count)" : "Add someone to continue")
+                            .font(.system(size: 16, weight: .bold))
+                        // Custom arrow right icon
+                        ArrowRightIcon(size: 16, color: canContinue ? .white : Color.secondary)
                     }
-                    .foregroundColor(.white)
+                    .foregroundColor(canContinue ? .white : Color.secondary)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 18)
-                    .background(appState.people.count > 1 ? Color.accentColor : Color.primary.opacity(0.3))
-                    .cornerRadius(16)
-                    .shadow(
-                        color: appState.people.count > 1 ? Color.accentColor.opacity(0.3) : Color.clear,
-                        radius: 12, y: 4
-                    )
+                    .padding(.vertical, 16)
+                    .background(canContinue ? ink : Color.secondary.opacity(0.16))
+                    .cornerRadius(cardRadius)
                 }
-                .buttonStyle(ScaleButtonStyle())
-                .tutorialSpotlight(isHighlighted: shouldHighlightContinue, cornerRadius: 16)
-                .disabled(appState.people.count < 2 || tutorialManager.isActive)
+                .buttonStyle(PlainButtonStyle())
+                .tutorialSpotlight(isHighlighted: shouldHighlightContinue, cornerRadius: cardRadius)
+                .disabled(!canContinue || tutorialManager.isActive)
                 .id(appState.people.count)
             }
             .padding(20)
-            .background(
-                Color(.systemBackground)
-                    .shadow(color: Color.primary.opacity(0.05), radius: 20, y: -5)
-            )
+            .background(ivory)
         }
     }
 
     // MARK: - Helpers
 
-    private func sectionHeader(title: String, icon: String) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: icon)
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundColor(.secondary)
-            Text(title)
-                .font(.system(size: 20, weight: .bold))
-                .foregroundColor(.primary)
-        }
-        .padding(.leading, 2)
-    }
-
     private func addPerson() {
         guard !newPersonName.isEmpty else { return }
+        dismissKeyboard()
         let person = Person(name: newPersonName)
         withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
             appState.addPerson(person)
             storage.addRecentPerson(RecentPerson(name: newPersonName))
-            recentPeople  = storage.loadRecentPeople()
+            recentPeople = storage.loadRecentPeople()
             newPersonName = ""
+        }
+        hydrateDutchMember(for: person)
+    }
+
+    private func dismissKeyboard() {
+        isNameFieldFocused = false
+        UIApplication.shared.sendAction(
+            #selector(UIResponder.resignFirstResponder),
+            to: nil,
+            from: nil,
+            for: nil
+        )
+    }
+
+    private func currencyString(_ value: Double) -> String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .currency
+        formatter.maximumFractionDigits = 2
+        return formatter.string(from: NSNumber(value: value)) ?? String(format: "$%.2f", value)
+    }
+
+    private func hydrateDutchMember(for person: Person) {
+        AuthManager.shared.lookupVerifiedDutchieUser(phoneNumber: person.phoneNumber, name: person.name) { verified in
+            guard let verified,
+                  let index = appState.people.firstIndex(where: { $0.id == person.id }) else { return }
+
+            appState.people[index].dutchUID = verified.uid
+            appState.people[index].phoneNumber = verified.phoneNumber
+            appState.people[index].venmoUsername = verified.venmoUsername
+            appState.people[index].venmoLink = verified.venmoLink
+            appState.people[index].zelleContact = verified.zelleContact
+            appState.people[index].zelleLink = verified.zelleLink
+
+            if appState.people[index].contactImage == nil {
+                appState.people[index].contactImage = verified.imageData
+            }
+            HapticManager.notification(type: .success)
         }
     }
 }
@@ -1272,10 +1651,15 @@ struct SearchableContactPickerView: View {
 
     @Environment(\.dismiss) var dismiss
     @Environment(\.colorScheme) var colorScheme
-    @State private var searchText               = ""
+    @State private var searchText = ""
     @State private var allContacts: [CNContact] = []
     @State private var selectedContacts: Set<String> = []
-    @State private var isLoading                = true
+    @State private var isLoading = true
+    @State private var didRequestContacts = false
+    @State private var loadErrorMessage: String?
+    
+    private let ivory = Color(red: 1.0, green: 0.992, blue: 0.969)
+    private let ink = Color(red: 0.15, green: 0.15, blue: 0.15)
 
     var filteredContacts: [CNContact] {
         if searchText.isEmpty { return allContacts }
@@ -1287,13 +1671,13 @@ struct SearchableContactPickerView: View {
     var body: some View {
         NavigationView {
             ZStack {
-                Color(.systemBackground).ignoresSafeArea()
-
+                ivory.ignoresSafeArea()
                 VStack(spacing: 0) {
                     searchBar
-                    if isLoading        { loadingView   }
+                    if isLoading { loadingView }
+                    else if let loadErrorMessage { errorStateView(loadErrorMessage) }
                     else if allContacts.isEmpty { emptyStateView }
-                    else                { contactsList  }
+                    else { contactsList }
                 }
             }
             .navigationTitle("Add from Contacts")
@@ -1304,39 +1688,35 @@ struct SearchableContactPickerView: View {
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Done") {
-                        onContactsSelected(allContacts.filter { selectedContacts.contains($0.identifier) })
-                        dismiss()
+                        completeSelection()
                     }
-                    .foregroundColor(.accentColor)
+                    .foregroundColor(ink)
                     .fontWeight(.semibold)
                     .disabled(selectedContacts.isEmpty)
                 }
             }
         }
-        .onAppear { loadContacts() }
+        .onAppear { loadContactsIfNeeded() }
     }
 
     private var searchBar: some View {
         HStack(spacing: 12) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 16, weight: .medium))
-                .foregroundColor(.secondary)
-
+            // Custom magnifying glass icon
+            MagnifyingGlassIcon(size: 18)
             TextField("Search contacts...", text: $searchText)
                 .font(.system(size: 16, weight: .medium))
                 .foregroundColor(.primary)
-
             if !searchText.isEmpty {
                 Button(action: { searchText = "" }) {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 16))
-                        .foregroundColor(.secondary)
+                    // Custom X circle icon
+                    XCircleIcon(size: 18)
                 }
             }
         }
         .padding(14)
         .background(Color(.secondarySystemBackground))
-        .cornerRadius(12)
+        .cornerRadius(8)
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.15), lineWidth: 1))
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
     }
@@ -1359,21 +1739,14 @@ struct SearchableContactPickerView: View {
 
     private func contactRow(contact: CNContact) -> some View {
         let isSelected = selectedContacts.contains(contact.identifier)
-        let fullName   = "\(contact.givenName) \(contact.familyName)".trimmingCharacters(in: .whitespaces)
+        let fullName = "\(contact.givenName) \(contact.familyName)".trimmingCharacters(in: .whitespaces)
 
         return HStack(spacing: 14) {
-            if let imageData = contact.imageData, let uiImage = UIImage(data: imageData) {
-                Image(uiImage: uiImage)
-                    .resizable().scaledToFill()
-                    .frame(width: 44, height: 44)
-                    .clipShape(Circle())
-            } else {
-                ZStack {
-                    Circle().fill(Color.primary.opacity(0.1)).frame(width: 44, height: 44)
-                    Text(String(contact.givenName.prefix(1)))
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundColor(.primary)
-                }
+            ZStack {
+                Circle().fill(Color.primary.opacity(0.1)).frame(width: 44, height: 44)
+                Text(String(contact.givenName.prefix(1)))
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(.primary)
             }
 
             VStack(alignment: .leading, spacing: 4) {
@@ -1387,13 +1760,30 @@ struct SearchableContactPickerView: View {
 
             Spacer()
 
-            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                .font(.system(size: 24))
-                .foregroundColor(isSelected ? .accentColor : .secondary)
+            // Custom selection indicator
+            ZStack {
+                Circle()
+                    .stroke(isSelected ? ink : Color.secondary, lineWidth: 2)
+                    .frame(width: 24, height: 24)
+                if isSelected {
+                    Circle()
+                        .fill(ink)
+                        .frame(width: 24, height: 24)
+                    Canvas { ctx, s in
+                        var check = Path()
+                        check.move(to:    CGPoint(x: s.width * 0.27, y: s.height * 0.52))
+                        check.addLine(to: CGPoint(x: s.width * 0.45, y: s.height * 0.68))
+                        check.addLine(to: CGPoint(x: s.width * 0.73, y: s.height * 0.35))
+                        ctx.stroke(check, with: .color(.white),
+                                   style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                    }
+                    .frame(width: 24, height: 24)
+                }
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
-        .background(isSelected ? Color.accentColor.opacity(0.05) : Color.clear)
+        .background(isSelected ? ink.opacity(0.05) : Color.clear)
     }
 
     private var loadingView: some View {
@@ -1406,11 +1796,56 @@ struct SearchableContactPickerView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    private func errorStateView(_ message: String) -> some View {
+        VStack(spacing: 16) {
+            ZStack {
+                Circle()
+                    .stroke(Color.secondary, lineWidth: 2)
+                    .frame(width: 48, height: 48)
+                Text("!")
+                    .font(.system(size: 24, weight: .bold))
+                    .foregroundColor(.secondary)
+            }
+            Text("Contacts Unavailable")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundColor(.primary)
+            Text(message)
+                .font(.system(size: 14))
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 40)
+            Button("Try Again") {
+                didRequestContacts = false
+                loadContactsIfNeeded()
+            }
+            .font(.system(size: 14, weight: .bold))
+            .foregroundColor(ink)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
     private var emptyStateView: some View {
         VStack(spacing: 16) {
-            Image(systemName: "person.crop.circle.badge.xmark")
-                .font(.system(size: 48))
-                .foregroundColor(.secondary)
+            // Custom empty state: magnifying glass with X
+            ZStack {
+                Circle()
+                    .stroke(Color.secondary, lineWidth: 2)
+                    .frame(width: 48, height: 48)
+                Canvas { ctx, s in
+                    let w = s.width, h = s.height
+                    let sw: CGFloat = 2.0
+                    let pad: CGFloat = 0.28
+                    var d1 = Path()
+                    d1.move(to:    CGPoint(x: w * pad,       y: h * pad))
+                    d1.addLine(to: CGPoint(x: w * (1 - pad), y: h * (1 - pad)))
+                    ctx.stroke(d1, with: .color(Color.secondary), lineWidth: sw)
+                    var d2 = Path()
+                    d2.move(to:    CGPoint(x: w * (1 - pad), y: h * pad))
+                    d2.addLine(to: CGPoint(x: w * pad,       y: h * (1 - pad)))
+                    ctx.stroke(d2, with: .color(Color.secondary), lineWidth: sw)
+                }
+                .frame(width: 48, height: 48)
+            }
             Text("No Contacts Found")
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundColor(.primary)
@@ -1423,33 +1858,87 @@ struct SearchableContactPickerView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    private func loadContactsIfNeeded() {
+        guard !didRequestContacts else { return }
+        didRequestContacts = true
+        isLoading = true
+        loadErrorMessage = nil
+        allContacts = []
+        loadContacts()
+    }
+
     private func loadContacts() {
+        let status = CNContactStore.authorizationStatus(for: .contacts)
+        switch status {
+        case .authorized, .limited:
+            fetchContacts()
+        case .notDetermined:
+            CNContactStore().requestAccess(for: .contacts) { granted, _ in
+                if granted {
+                    fetchContacts()
+                } else {
+                    DispatchQueue.main.async {
+                        isLoading = false
+                        loadErrorMessage = "Allow Contacts access in Settings to add people from your phone."
+                    }
+                }
+            }
+        case .denied, .restricted:
+            isLoading = false
+            loadErrorMessage = "Allow Contacts access in Settings to add people from your phone."
+        @unknown default:
+            fetchContacts()
+        }
+    }
+
+    private func fetchContacts() {
         DispatchQueue.global(qos: .userInitiated).async {
+            let start = CFAbsoluteTimeGetCurrent()
             let store = CNContactStore()
             let keysToFetch: [CNKeyDescriptor] = [
                 CNContactGivenNameKey as CNKeyDescriptor,
                 CNContactFamilyNameKey as CNKeyDescriptor,
-                CNContactPhoneNumbersKey as CNKeyDescriptor,
-                CNContactImageDataKey as CNKeyDescriptor
+                CNContactPhoneNumbersKey as CNKeyDescriptor
             ]
-            store.requestAccess(for: .contacts) { granted, _ in
-                guard granted else {
-                    DispatchQueue.main.async { isLoading = false }
-                    return
+            var loadedContacts: [CNContact] = []
+            var batch: [CNContact] = []
+            let request = CNContactFetchRequest(keysToFetch: keysToFetch)
+            request.sortOrder = .userDefault
+            func publish(_ contacts: [CNContact]) {
+                guard !contacts.isEmpty else { return }
+                DispatchQueue.main.async {
+                    if isLoading { isLoading = false }
+                    allContacts.append(contentsOf: contacts)
+                    loadErrorMessage = nil
                 }
-                var contacts: [CNContact] = []
-                let request = CNContactFetchRequest(keysToFetch: keysToFetch)
-                do {
-                    try store.enumerateContacts(with: request) { contact, _ in contacts.append(contact) }
-                    DispatchQueue.main.async {
-                        allContacts = contacts.sorted {
-                            "\($0.givenName) \($0.familyName)" < "\($1.givenName) \($1.familyName)"
-                        }
-                        isLoading = false
+            }
+            do {
+                try store.enumerateContacts(with: request) { contact, _ in
+                    guard !contact.phoneNumbers.isEmpty else { return }
+                    loadedContacts.append(contact)
+                    batch.append(contact)
+                    if batch.count >= 80 {
+                        let contactsToPublish = batch
+                        batch.removeAll(keepingCapacity: true)
+                        publish(contactsToPublish)
                     }
-                } catch {
-                    print("Failed to fetch contacts: \(error)")
-                    DispatchQueue.main.async { isLoading = false }
+                }
+                publish(batch)
+                let sortedContacts = ContactRanking.sortedLightweight(loadedContacts)
+                DispatchQueue.main.async {
+                    allContacts = sortedContacts
+                    loadErrorMessage = nil
+                    isLoading = false
+                    let elapsedMs = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
+                    if elapsedMs > 100 {
+                        print("🧭 PERF [contacts:people-load] count=\(sortedContacts.count) ms=\(elapsedMs)")
+                    }
+                }
+            } catch {
+                print("Failed to fetch contacts: \(error)")
+                DispatchQueue.main.async {
+                    isLoading = false
+                    loadErrorMessage = "Could not load contacts. Please try again."
                 }
             }
         }
@@ -1461,6 +1950,35 @@ struct SearchableContactPickerView: View {
             selectedContacts.remove(contact.identifier)
         } else {
             selectedContacts.insert(contact.identifier)
+        }
+    }
+
+    private func completeSelection() {
+        let ids = selectedContacts
+        let lightweightSelection = allContacts.filter { ids.contains($0.identifier) }
+        guard !lightweightSelection.isEmpty else { return }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let store = CNContactStore()
+            let keysToFetch: [CNKeyDescriptor] = [
+                CNContactGivenNameKey as CNKeyDescriptor,
+                CNContactFamilyNameKey as CNKeyDescriptor,
+                CNContactNicknameKey as CNKeyDescriptor,
+                CNContactPhoneNumbersKey as CNKeyDescriptor,
+                CNContactImageDataKey as CNKeyDescriptor,
+                CNContactThumbnailImageDataKey as CNKeyDescriptor
+            ]
+
+            var hydrated: [CNContact] = []
+            for id in ids {
+                guard let contact = try? store.unifiedContact(withIdentifier: id, keysToFetch: keysToFetch) else { continue }
+                hydrated.append(contact)
+            }
+
+            DispatchQueue.main.async {
+                onContactsSelected(hydrated.isEmpty ? lightweightSelection : hydrated)
+                dismiss()
+            }
         }
     }
 }

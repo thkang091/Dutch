@@ -95,7 +95,7 @@ class ShareViewController: UIViewController {
         // Title
         let plural = extractedImages.count == 1 ? "receipt" : "receipts"
         let title = makeLabel(
-            "\(extractedImages.count) \(plural) ready for Dutchi",
+            "\(extractedImages.count) \(plural) ready for Dutch",
             font: .systemFont(ofSize: 20, weight: .bold),
             color: .label,
             alignment: .center
@@ -104,7 +104,7 @@ class ShareViewController: UIViewController {
 
         // Subtitle
         let subtitle = makeLabel(
-            "Open Dutchi whenever you're ready to process.",
+            "Open Dutch now to add them, or save them for later.",
             font: .systemFont(ofSize: 15),
             color: .secondaryLabel,
             alignment: .center
@@ -112,13 +112,22 @@ class ShareViewController: UIViewController {
         container.addArrangedSubview(subtitle)
         container.setCustomSpacing(24, after: subtitle)
 
-        // Save for Later button
+        let openButton = makeButton(
+            title: "Open in Dutch",
+            background: .label,
+            titleColor: .white,
+            action: #selector(openDutchiTapped)
+        )
+        container.addArrangedSubview(openButton)
+
         let saveButton = makeButton(
             title: "Save for Later",
-            background: .systemBlue,
-            titleColor: .white,
+            background: .secondarySystemBackground,
+            titleColor: .label,
             action: #selector(saveLaterTapped)
         )
+        saveButton.layer.borderWidth = 1
+        saveButton.layer.borderColor = UIColor.separator.cgColor
         container.addArrangedSubview(saveButton)
 
         // Cancel
@@ -133,7 +142,18 @@ class ShareViewController: UIViewController {
     // MARK: - Actions
 
     @objc private func saveLaterTapped() {
-        showSavedConfirmation(message: "Saved! Open Dutchi whenever you are ready.")
+        showSavedConfirmation(message: "Saved! Open Dutch whenever you are ready.")
+    }
+
+    @objc private func openDutchiTapped() {
+        guard let url = URL(string: "dutchie://shared-upload") else {
+            extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
+            return
+        }
+
+        extensionContext?.open(url) { [weak self] _ in
+            self?.extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
+        }
     }
 
     @objc private func cancelTapped() {

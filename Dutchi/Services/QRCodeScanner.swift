@@ -3,9 +3,6 @@ import Vision
 
 class QRCodeScanner {
     
-    /// Scans a QR code image and extracts the payment link
-    /// - Parameter image: The QR code image to scan
-    /// - Returns: The extracted URL string, or nil if no QR code found
     static func extractPaymentLink(from image: UIImage) -> String? {
         guard let cgImage = image.cgImage else {
             print("❌ QRCodeScanner: Failed to get CGImage from UIImage")
@@ -25,19 +22,17 @@ class QRCodeScanner {
                 return nil
             }
             
-            print("✅ QRCodeScanner: Found \(results.count) QR code(s)")
+            print("QRCodeScanner: Found \(results.count) QR code(s)")
             
             // Try all detected QR codes
             for (index, result) in results.enumerated() {
                 if let payload = result.payloadStringValue {
-                    print("📱 QRCodeScanner: QR #\(index + 1) payload: \(payload.prefix(100))...")
-                    
                     // Check if it's a valid payment link
                     if isZelleLink(payload) || isVenmoLink(payload) {
-                        print("✅ QRCodeScanner: Valid payment link found!")
+                        print("QRCodeScanner: Valid payment link found in QR #\(index + 1)")
                         return payload
                     } else {
-                        print("⚠️ QRCodeScanner: QR #\(index + 1) is not a payment link")
+                        print("QRCodeScanner: QR #\(index + 1) is not a payment link")
                     }
                 }
             }
@@ -68,11 +63,11 @@ class QRCodeScanner {
                       lowercased.contains("zelle://")
         
         if isZelle {
-            print("✅ QRCodeScanner: Validated as Zelle link")
+            print("QRCodeScanner: Validated as Zelle link")
             
             // Additional validation: check if it has the data parameter (for QR codes)
             if lowercased.contains("data=") {
-                print("✅ QRCodeScanner: Zelle QR link contains data parameter")
+                print("QRCodeScanner: Zelle QR link contains data parameter")
             }
         }
         
@@ -89,7 +84,7 @@ class QRCodeScanner {
                       lowercased.contains("venmo://")
         
         if isVenmo {
-            print("✅ QRCodeScanner: Validated as Venmo link")
+            print("QRCodeScanner: Validated as Venmo link")
         }
         
         return isVenmo
@@ -115,14 +110,7 @@ class QRCodeScanner {
             return nil
         }
         
-        print("✅ QRCodeScanner: Successfully decoded Zelle QR data")
-        if let action = json["action"] as? String,
-           let token = json["token"] as? String,
-           let name = json["name"] as? String {
-            print("   - Action: \(action)")
-            print("   - Token: \(token)")
-            print("   - Name: \(name)")
-        }
+        print("QRCodeScanner: Successfully decoded Zelle QR data")
         
         return json
     }

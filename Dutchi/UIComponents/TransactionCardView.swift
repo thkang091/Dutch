@@ -1,6 +1,8 @@
 import SwiftUI
 import UIKit
 
+// MARK: - TransactionCardView
+
 struct TransactionCardView: View {
     @Binding var transaction: Transaction
     let allPeople: [Person]
@@ -17,19 +19,20 @@ struct TransactionCardView: View {
     @EnvironmentObject var tutorialManager: TutorialManager
     @Environment(\.colorScheme) var colorScheme
 
-    var hasReceiptImage: Bool {
-        transaction.receiptImage != nil
-    }
+    // MARK: - Warm receipt palette
+    private let ink        = Color(red: 0.11, green: 0.10, blue: 0.08)
+    private let ivory      = Color(red: 1.00, green: 0.99, blue: 0.97)
+    private let cream      = Color(red: 0.96, green: 0.94, blue: 0.91)
+    private let parchment  = Color(red: 0.93, green: 0.91, blue: 0.85)
+    private let redInk     = Color(red: 0.48, green: 0.12, blue: 0.12)
 
-    // MARK: - Advanced split detection
+    // MARK: - Helpers
 
-    /// True when the transaction has a custom weighted split stored
     private var hasCustomSplit: Bool {
         !transaction.splitQuantities.isEmpty &&
         transaction.splitQuantities.values.contains(where: { $0 > 1 })
     }
 
-    /// Amount owed by a specific person given their quantity weight
     private func weightedAmount(for person: Person) -> Double {
         let quantities = transaction.splitWith.map { p in
             transaction.splitQuantities[p.id] ?? 1
@@ -39,8 +42,6 @@ struct TransactionCardView: View {
         let myQty = transaction.splitQuantities[person.id] ?? 1
         return transaction.amount * (Double(myQty) / Double(total))
     }
-
-    // MARK: - Select All / Deselect All helpers
 
     private var allPeopleSelected: Bool {
         allPeople.allSatisfy { person in
@@ -55,7 +56,6 @@ struct TransactionCardView: View {
                     transaction.splitWith.append(person)
                 }
             }
-            // Reset any custom split when selecting all equally
             transaction.splitQuantities = [:]
         }
         HapticManager.impact(style: .light)
@@ -73,350 +73,469 @@ struct TransactionCardView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            mainContent
-            deleteSection
-        }
-        .background(Color(.secondarySystemBackground))
-        .cornerRadius(16)
-        .shadow(color: Color.primary.opacity(0.06), radius: 8, y: 2)
-    }
-
-    // MARK: - Main Content
-
-    private var mainContent: some View {
-        VStack(alignment: .leading, spacing: 16) {
             headerRow
-
-            if hasReceiptImage {
+            heavyDash
+            if transaction.receiptImage != nil {
                 receiptButtons
+                heavyDash
             }
-
             paidBySection
+            heavyDash
             splitSection
+            heavyDash
+            deleteRow
         }
-        .padding(20)
+        .background(ivory)
+        .overlay(
+            RoundedRectangle(cornerRadius: 2)
+                .stroke(ink, lineWidth: 1.5)
+        )
+        .cornerRadius(2)
     }
 
-    // MARK: - Header Row
+    // MARK: - Dashed dividers
 
-    private var headerRow: some View {
-        HStack(alignment: .top) {
-            merchantInfo
-            Spacer()
-            amountSection
-        }
+    private var heavyDash: some View {
+        dashedLine(opacity: 0.30)
     }
 
-    private var merchantInfo: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Button(action: onEditName) {
-                HStack(spacing: 6) {
-                    Text(transaction.merchant)
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundColor(.primary)
-
-                    Image(systemName: "pencil.circle.fill")
-                        .font(.system(size: 14))
-                        .foregroundColor(.secondary)
+    private func dashedLine(opacity: Double) -> some View {
+        Rectangle()
+            .fill(Color.clear)
+            .frame(height: 1)
+            .overlay(
+                GeometryReader { geometry in
+                    Path { path in
+                        let dashWidth: CGFloat = 5
+                        let dashGap:   CGFloat = 5
+                        var x: CGFloat = 0
+                        while x < geometry.size.width {
+                            path.move(to: CGPoint(x: x, y: 0))
+                            path.addLine(to: CGPoint(x: min(x + dashWidth, geometry.size.width), y: 0))
+                            x += dashWidth + dashGap
+                        }
+                    }
+                    .stroke(ink.opacity(opacity), lineWidth: 1)
                 }
-            }
-            .buttonStyle(PlainButtonStyle())
-        }
+            )
     }
 
-    private var amountSection: some View {
-        VStack(alignment: .trailing, spacing: 4) {
-            amountButton
+    // MARK: - Section band with better visibility
 
-            if transaction.isManual {
-                Text("Manual")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(.secondary)
-            }
-        }
-    }
-
-    private var amountButton: some View {
-        Button(action: onEditAmount) {
-            HStack(spacing: 4) {
-                Text(transaction.formattedAmount)
-                    .font(.system(size: 22, weight: .bold))
-                    .foregroundColor(.primary)
-
-                Image(systemName: "pencil.circle.fill")
-                    .font(.system(size: 16))
-                    .foregroundColor(.secondary)
-            }
-        }
-    }
-
-    // MARK: - Receipt Buttons
-
-    private var receiptButtons: some View {
-        HStack(spacing: 12) {
-            viewReceiptButton
-
-            if onBreakdown != nil {
-                breakdownButton
-            }
-
-            Spacer()
-        }
-    }
-
-    private var viewReceiptButton: some View {
-        Button {
-            onImageTap()
-        } label: {
+    private func sectionBand(
+        label: String,
+        value: String,
+        isExpanded: Bool,
+        trailingButton: AnyView? = nil,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
             HStack(spacing: 8) {
-                Image(systemName: "photo.fill")
-                    .font(.system(size: 14))
-                    .foregroundColor(.secondary)
+                Text(label)
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(ink.opacity(0.65))
+                    .tracking(1.8)
+                    .textCase(.uppercase)
 
-                Text("View Receipt")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(.primary.opacity(0.8))
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(Color.primary.opacity(0.08))
-            .cornerRadius(8)
-        }
-        .buttonStyle(PlainButtonStyle())
-        .contentShape(Rectangle())
-    }
+                Circle()
+                    .fill(ink.opacity(0.40))
+                    .frame(width: 3, height: 3)
 
-    private var breakdownButton: some View {
-        Button {
-            onBreakdown?()
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "list.bullet.rectangle")
-                Text("Break Down")
-                    .font(.system(size: 14, weight: .medium))
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(Color.primary.opacity(0.08))
-            .cornerRadius(8)
-        }
-        .buttonStyle(PlainButtonStyle())
-    }
-
-    // MARK: - Paid By Section
-
-    private var paidBySection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            paidByToggleButton
-
-            if showPaidByOptions {
-                paidByList
-                    .transition(.opacity.combined(with: .move(edge: .top)))
-            }
-        }
-    }
-
-    private var paidByToggleButton: some View {
-        Button(action: {
-            withAnimation(.spring(response: 0.3)) {
-                showPaidByOptions.toggle()
-            }
-        }) {
-            HStack {
-                Image(systemName: "creditcard.fill")
-                    .font(.system(size: 14))
-                    .foregroundColor(.secondary)
-
-                Text("Paid by \(transaction.paidBy.name)")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(.primary.opacity(0.8))
+                Text(value)
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundColor(ink)
 
                 Spacer()
 
-                Image(systemName: showPaidByOptions ? "chevron.up" : "chevron.down")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(.secondary)
-            }
-        }
-    }
-
-    private var paidByList: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(allPeople) { person in
-                PaidByRow(
-                    person: person,
-                    isSelected: transaction.paidBy.id == person.id,
-                    onSelect: { selectPaidBy(person) }
-                )
-            }
-        }
-        .padding(.top, 4)
-    }
-
-    // MARK: - Split Section
-
-    private var splitSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            splitToggleRow
-
-            if showSplitOptions {
-                splitPeopleContent
-                    .transition(.opacity.combined(with: .move(edge: .top)))
-            }
-        }
-    }
-
-    /// Collapsed toggle row — shows split summary + Advanced button always visible
-    private var splitToggleRow: some View {
-        HStack(spacing: 8) {
-            // Left: expand/collapse the person list
-            Button(action: {
-                withAnimation(.spring(response: 0.3)) {
-                    showSplitOptions.toggle()
+                if let btn = trailingButton {
+                    btn
                 }
-            }) {
-                HStack(spacing: 6) {
-                    Image(systemName: "person.2.fill")
-                        .font(.system(size: 14))
-                        .foregroundColor(.secondary)
 
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("Split with \(transaction.splitWith.count) \(transaction.splitWith.count == 1 ? "person" : "people")")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundColor(.primary.opacity(0.8))
-
-                        // Custom split badge — visible in collapsed state
-                        if hasCustomSplit {
-                            Text("Custom weights applied")
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundColor(.accentColor)
-                        }
-                    }
-
-                    Spacer()
-
-                    Image(systemName: showSplitOptions ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(.secondary)
+                // Chevron in a circle
+                ZStack {
+                    Circle()
+                        .stroke(ink.opacity(0.30), lineWidth: 1.5)
+                        .frame(width: 24, height: 24)
+                    Text(isExpanded ? "▴" : "▾")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(ink.opacity(0.65))
                 }
             }
-            .buttonStyle(PlainButtonStyle())
+            .padding(.horizontal, 16)
+            .padding(.vertical, 15)
+            .background(ivory)
+        }
+        .buttonStyle(PlainButtonStyle())
+    }
 
-            // Right: Advanced Split button — always visible so users can find it
-            if let advancedSplit = onAdvancedSplit {
-                Button(action: advancedSplit) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "slider.horizontal.3")
-                            .font(.system(size: 12, weight: .semibold))
-                        Text("Advanced")
-                            .font(.system(size: 12, weight: .semibold))
+    // MARK: - Header row - improved visibility
+
+    private var headerRow: some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 6) {
+                Button(action: onEditName) {
+                    HStack(spacing: 6) {
+                        Text(transaction.merchant.uppercased())
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundColor(ink)
+                            .tracking(0.3)
+                            .multilineTextAlignment(.leading)
+                        editBadge
                     }
-                    .foregroundColor(hasCustomSplit ? .white : .accentColor)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(hasCustomSplit ? Color.accentColor : Color.accentColor.opacity(0.1))
-                    .cornerRadius(8)
+                }
+                .buttonStyle(PlainButtonStyle())
+
+                if transaction.isManual {
+                    Text("MANUAL ENTRY")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(ink.opacity(0.55))
+                        .tracking(1.2)
+                } else if transaction.receiptImage != nil {
+                    Text("RECEIPT")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(ink.opacity(0.55))
+                        .tracking(1.2)
+                }
+            }
+
+            Spacer()
+
+            VStack(alignment: .trailing, spacing: 4) {
+                Button(action: onEditAmount) {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(transaction.formattedAmount)
+                            .font(.system(size: 28, weight: .bold))
+                            .foregroundColor(ink)
+                        editBadge
+                    }
                 }
                 .buttonStyle(PlainButtonStyle())
             }
         }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 16)
     }
 
-    /// Expanded people list with Select All / Deselect All at top
-    private var splitPeopleContent: some View {
-        VStack(alignment: .leading, spacing: 8) {
+    private var editBadge: some View {
+        Text("EDIT")
+            .font(.system(size: 9, weight: .bold))
+            .foregroundColor(ink.opacity(0.55))
+            .tracking(1)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .overlay(
+                RoundedRectangle(cornerRadius: 2)
+                    .stroke(ink.opacity(0.28), lineWidth: 1.5)
+            )
+    }
 
-            // Select All / Deselect All
-            HStack {
-                Button(action: {
-                    if allPeopleSelected { deselectAll() } else { selectAll() }
-                }) {
-                    HStack(spacing: 5) {
-                        Image(systemName: allPeopleSelected
-                              ? "person.crop.circle.badge.minus"
-                              : "person.crop.circle.badge.checkmark")
-                            .font(.system(size: 13))
-                        Text(allPeopleSelected ? "Deselect All" : "Select All")
-                            .font(.system(size: 13, weight: .semibold))
+    // MARK: - Receipt action buttons - improved visibility
+
+    private var receiptButtons: some View {
+        HStack(spacing: 10) {
+            Button(action: onImageTap) {
+                HStack(spacing: 8) {
+                    receiptIcon
+                    Text("VIEW RECEIPT")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(ink)
+                        .tracking(0.5)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 2)
+                        .stroke(ink, lineWidth: 1.5)
+                )
+            }
+            .buttonStyle(ScaleButtonStyle(scale: 0.97))
+
+            if let breakdown = onBreakdown {
+                Button(action: breakdown) {
+                    HStack(spacing: 8) {
+                        linesIcon
+                        Text("BREAK DOWN")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(ink)
+                            .tracking(0.5)
                     }
-                    .foregroundColor(allPeopleSelected ? .red.opacity(0.85) : .accentColor)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(
-                        (allPeopleSelected ? Color.red : Color.accentColor).opacity(0.09)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 2)
+                            .stroke(ink, lineWidth: 1.5)
                     )
-                    .cornerRadius(8)
+                }
+                .buttonStyle(ScaleButtonStyle(scale: 0.97))
+            }
+
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+    }
+
+    private var receiptIcon: some View {
+        VStack(spacing: 2) {
+            Rectangle().fill(ink).frame(width: 12, height: 2)
+            Rectangle().fill(ink).frame(width: 10, height: 2)
+            Rectangle().fill(ink).frame(width: 12, height: 2)
+        }
+    }
+
+    private var linesIcon: some View {
+        VStack(spacing: 2) {
+            Rectangle().fill(ink).frame(width: 12, height: 2)
+            Rectangle().fill(ink).frame(width: 12, height: 2)
+            Rectangle().fill(ink).frame(width: 12, height: 2)
+        }
+    }
+
+    // MARK: - Paid By section
+
+    private var paidBySection: some View {
+        VStack(spacing: 0) {
+            sectionBand(
+                label: "Paid by",
+                value: transaction.paidBy.name,
+                isExpanded: showPaidByOptions,
+                action: {
+                    withAnimation(.spring(response: 0.3)) { showPaidByOptions.toggle() }
+                }
+            )
+
+            if showPaidByOptions {
+                VStack(spacing: 0) {
+                    ForEach(allPeople) { person in
+                        paidByRow(person: person)
+                        if person.id != allPeople.last?.id {
+                            Divider()
+                                .background(ink.opacity(0.08))
+                        }
+                    }
+                }
+                .padding(.bottom, 8)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+    }
+
+    private func paidByRow(person: Person) -> some View {
+        let isSelected = transaction.paidBy.id == person.id
+        return Button(action: {
+            withAnimation(.spring(response: 0.3)) {
+                transaction.paidBy = person
+                showPaidByOptions = false
+            }
+        }) {
+            HStack(spacing: 12) {
+                checkboxView(checked: isSelected)
+                AvatarView(imageData: person.contactImage, initials: person.initials, size: 32)
+                    .overlay(Circle().stroke(ink.opacity(0.16), lineWidth: 1))
+                    .opacity(isSelected ? 1 : 0.45)
+                Text(person.name)
+                    .font(.system(size: 15, weight: isSelected ? .semibold : .regular))
+                    .foregroundColor(isSelected ? ink : ink.opacity(0.50))
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 11)
+            .background(isSelected ? ivory : parchment.opacity(0.45))
+        }
+        .buttonStyle(PlainButtonStyle())
+    }
+
+    // MARK: - Split section
+
+    private var splitSection: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                sectionBand(
+                    label: "Split with",
+                    value: "\(transaction.splitWith.count) \(transaction.splitWith.count == 1 ? "person" : "people")",
+                    isExpanded: showSplitOptions,
+                    trailingButton: onAdvancedSplit != nil ? AnyView(advancedButton) : nil,
+                    action: {
+                        withAnimation(.spring(response: 0.3)) { showSplitOptions.toggle() }
+                    }
+                )
+            }
+
+            if showSplitOptions {
+                VStack(spacing: 0) {
+                    // Select all / Reset row
+                    HStack(spacing: 10) {
+                        Button(action: {
+                            if allPeopleSelected { deselectAll() } else { selectAll() }
+                        }) {
+                            Text(allPeopleSelected ? "DESELECT ALL" : "SELECT ALL")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(allPeopleSelected ? redInk : ink.opacity(0.65))
+                                .tracking(1.2)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 2)
+                                        .stroke(
+                                            allPeopleSelected ? redInk.opacity(0.5) : ink.opacity(0.25),
+                                            lineWidth: 1.5
+                                        )
+                                )
+                        }
+                        .buttonStyle(ScaleButtonStyle(scale: 0.95))
+
+                        Spacer()
+
+                        if hasCustomSplit {
+                            Button(action: {
+                                withAnimation(.spring(response: 0.3)) {
+                                    transaction.splitQuantities = [:]
+                                }
+                            }) {
+                                Text("RESET EQUAL")
+                                    .font(.system(size: 10, weight: .bold))
+                                    .foregroundColor(ink.opacity(0.60))
+                                    .tracking(0.8)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 2)
+                                            .stroke(ink.opacity(0.20), lineWidth: 1.5)
+                                    )
+                            }
+                            .buttonStyle(ScaleButtonStyle(scale: 0.95))
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+
+                    VStack(spacing: 0) {
+                        ForEach(allPeople) { person in
+                            personSplitRow(person: person)
+                            if person.id != allPeople.last?.id {
+                                Divider()
+                                    .background(ink.opacity(0.08))
+                                    .padding(.leading, 16)
+                            }
+                        }
+                    }
+                    .padding(.bottom, 8)
+                }
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+    }
+
+    private var advancedButton: some View {
+        Button(action: { onAdvancedSplit?() }) {
+            HStack(spacing: 6) {
+                VStack(spacing: 2) {
+                    Rectangle().fill(hasCustomSplit ? Color.white : ink).frame(width: 12, height: 2)
+                    Rectangle().fill(hasCustomSplit ? Color.white : ink).frame(width: 12, height: 2)
+                    Rectangle().fill(hasCustomSplit ? Color.white : ink).frame(width: 8,  height: 2)
+                }
+                Text("ADVANCED")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(hasCustomSplit ? .white : ink)
+                    .tracking(0.5)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(hasCustomSplit ? ink : Color.clear)
+            .overlay(
+                RoundedRectangle(cornerRadius: 2)
+                    .stroke(ink, lineWidth: 1.5)
+            )
+            .cornerRadius(2)
+        }
+        .buttonStyle(ScaleButtonStyle(scale: 0.95))
+    }
+
+    private func personSplitRow(person: Person) -> some View {
+        let isIncluded = isPersonIncluded(person)
+        let amount: Double = hasCustomSplit && isIncluded
+            ? weightedAmount(for: person)
+            : transaction.perPersonAmount
+        let customWeight: Int? = hasCustomSplit ? (transaction.splitQuantities[person.id] ?? 1) : nil
+
+        return Button(action: { togglePersonInSplit(person) }) {
+            HStack(spacing: 12) {
+                checkboxView(checked: isIncluded)
+
+                AvatarView(imageData: person.contactImage, initials: person.initials, size: 32)
+                    .overlay(Circle().stroke(ink.opacity(0.12), lineWidth: 1))
+                    .opacity(isIncluded ? 1 : 0.40)
+
+                Text(person.name)
+                    .font(.system(size: 15, weight: .regular))
+                    .foregroundColor(isIncluded ? ink : ink.opacity(0.48))
+
+                if let weight = customWeight, isIncluded, weight > 1 {
+                    Text("\(weight)×")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.white)
+                        .tracking(0.3)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(ink)
+                        .cornerRadius(2)
                 }
 
                 Spacer()
 
-                // Clear custom split shortcut
-                if hasCustomSplit {
-                    Button(action: {
-                        withAnimation(.spring(response: 0.3)) {
-                            transaction.splitQuantities = [:]
-                        }
-                    }) {
-                        Text("Reset to Equal")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(.secondary)
-                    }
+                if isIncluded {
+                    Text(String(format: "$%.2f", amount))
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(ink.opacity(0.60))
+                } else {
+                    Text("—")
+                        .font(.system(size: 15))
+                        .foregroundColor(ink.opacity(0.25))
                 }
             }
-            .padding(.bottom, 2)
-
-            // Individual person rows — show weighted amounts when custom split is active
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(allPeople) { person in
-                    PersonRow(
-                        person: person,
-                        isIncluded: isPersonIncluded(person),
-                        // Show weighted amount if custom split, otherwise equal split
-                        perPersonAmount: hasCustomSplit && isPersonIncluded(person)
-                            ? weightedAmount(for: person)
-                            : transaction.perPersonAmount,
-                        customWeight: hasCustomSplit
-                            ? (transaction.splitQuantities[person.id] ?? 1)
-                            : nil,
-                        onToggle: { togglePersonInSplit(person) }
-                    )
-                }
-            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 11)
+            .background(isIncluded ? ivory : parchment.opacity(0.42))
         }
-        .padding(.top, 4)
+        .buttonStyle(PlainButtonStyle())
+        .contentShape(Rectangle())
+        .animation(.spring(response: 0.25), value: isIncluded)
     }
 
-    // MARK: - Delete Section
+    // MARK: - Shared checkbox - larger and more visible
 
-    private var deleteSection: some View {
-        VStack(spacing: 0) {
-            Rectangle()
-                .fill(Color.primary.opacity(0.15))
-                .frame(height: 1)
+    private func checkboxView(checked: Bool) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(checked ? ink : Color.clear)
+                .frame(width: 18, height: 18)
+            RoundedRectangle(cornerRadius: 2)
+                .stroke(ink, lineWidth: 1.5)
+                .frame(width: 18, height: 18)
+            if checked {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.white)
+            }
+        }
+    }
 
-            Button(action: onDelete) {
-                HStack {
-                    Image(systemName: "trash")
-                        .font(.system(size: 14))
+    // MARK: - Delete row - more visible
 
-                    Text("Remove Transaction")
-                        .font(.system(size: 14, weight: .medium))
-                }
-                .foregroundColor(.red.opacity(0.85))
+    private var deleteRow: some View {
+        Button(action: onDelete) {
+            Text("REMOVE TRANSACTION")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(redInk)
+                .tracking(1.2)
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 14)
-            }
+                .padding(.vertical, 13)
         }
+        .buttonStyle(PlainButtonStyle())
+        .background(redInk.opacity(0.06))
     }
 
-    // MARK: - Helper Methods
-
-    private func selectPaidBy(_ person: Person) {
-        withAnimation(.spring(response: 0.3)) {
-            transaction.paidBy = person
-            showPaidByOptions = false
-        }
-    }
+    // MARK: - Helpers
 
     private func isPersonIncluded(_ person: Person) -> Bool {
         transaction.splitWith.contains(where: { $0.id == person.id })
@@ -431,138 +550,5 @@ struct TransactionCardView: View {
                 transaction.splitWith.append(person)
             }
         }
-    }
-}
-
-// MARK: - Paid By Row Component
-
-struct PaidByRow: View {
-    let person: Person
-    let isSelected: Bool
-    let onSelect: () -> Void
-    @Environment(\.colorScheme) var colorScheme
-
-    var body: some View {
-        Button(action: onSelect) {
-            HStack(spacing: 12) {
-                selectionIcon
-
-                AvatarView(
-                    imageData: person.contactImage,
-                    initials: person.initials,
-                    size: 32
-                )
-
-                Text(person.name)
-                    .font(.system(size: 15, weight: isSelected ? .semibold : .regular))
-                    .foregroundColor(.primary)
-
-                Spacer()
-
-                if isSelected {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundColor(.primary)
-                }
-            }
-            .padding(.vertical, 8)
-            .padding(.horizontal, 12)
-            .background(isSelected ? Color.primary.opacity(0.08) : Color.clear)
-            .cornerRadius(8)
-        }
-    }
-
-    private var selectionIcon: some View {
-        Circle()
-            .fill(isSelected ? Color.primary : Color.clear)
-            .frame(width: 20, height: 20)
-            .overlay(
-                Circle()
-                    .stroke(Color.primary.opacity(isSelected ? 1.0 : 0.4), lineWidth: 2)
-            )
-            .overlay(
-                Circle()
-                    .fill(colorScheme == .dark ? Color.black : Color.white)
-                    .frame(width: 8, height: 8)
-                    .opacity(isSelected ? 1.0 : 0)
-            )
-    }
-}
-
-// MARK: - Person Row Component
-
-struct PersonRow: View {
-    let person: Person
-    let isIncluded: Bool
-    let perPersonAmount: Double
-    /// Non-nil when a custom weighted split is active — shows the multiplier badge
-    let customWeight: Int?
-    let onToggle: () -> Void
-    @Environment(\.colorScheme) var colorScheme
-
-    // Convenience init to keep existing call sites without customWeight working
-    init(
-        person: Person,
-        isIncluded: Bool,
-        perPersonAmount: Double,
-        customWeight: Int? = nil,
-        onToggle: @escaping () -> Void
-    ) {
-        self.person = person
-        self.isIncluded = isIncluded
-        self.perPersonAmount = perPersonAmount
-        self.customWeight = customWeight
-        self.onToggle = onToggle
-    }
-
-    var body: some View {
-        Button(action: onToggle) {
-            HStack(spacing: 12) {
-                checkmarkIcon
-
-                AvatarView(
-                    imageData: person.contactImage,
-                    initials: person.initials,
-                    size: 32
-                )
-
-                Text(person.name)
-                    .font(.system(size: 15))
-                    .foregroundColor(.primary)
-
-                // Weight badge, e.g. "2×"
-                if let weight = customWeight, isIncluded, weight > 1 {
-                    Text("\(weight)×")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Color.accentColor)
-                        .cornerRadius(5)
-                }
-
-                Spacer()
-
-                if isIncluded {
-                    amountText
-                }
-            }
-            .padding(.vertical, 8)
-            .padding(.horizontal, 12)
-            .background(isIncluded ? Color.primary.opacity(0.05) : Color.clear)
-            .cornerRadius(8)
-        }
-    }
-
-    private var checkmarkIcon: some View {
-        Image(systemName: isIncluded ? "checkmark.circle.fill" : "circle")
-            .font(.system(size: 20))
-            .foregroundColor(isIncluded ? .primary : .secondary)
-    }
-
-    private var amountText: some View {
-        Text(String(format: "$%.2f", perPersonAmount))
-            .font(.system(size: 14, weight: .semibold))
-            .foregroundColor(.secondary)
     }
 }

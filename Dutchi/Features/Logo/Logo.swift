@@ -68,7 +68,7 @@ struct LogoIntroView: View {
                 // Text Content
                 VStack(spacing: 16) {
                     VStack(spacing: 4) {
-                        Text("Dutchie")
+                        Text("Dutch")
                             .font(.system(size: 42, weight: .bold, design: .default))
                             .tracking(-0.5)
                             .foregroundColor(.black)

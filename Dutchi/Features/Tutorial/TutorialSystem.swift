@@ -16,7 +16,7 @@ struct TutorialStep: Identifiable, Equatable {
     enum TutorialTarget {
         case uploadSection
         case uploadButton
-        case uploadAndManual  // Multi-spotlight for step 1
+        case uploadAndManual
         case manualEntry
         case profileButton
         case receiptThumbnail
@@ -31,19 +31,23 @@ struct TutorialStep: Identifiable, Equatable {
         case splitSection
         case splitToggle
         case settleAll
+        case settleRequest
         case settlePayment
         case shareButton
         case messageIcon
         case fullScreen
         case paymentMethods
+        case quickAssignBar
+        case groupModeSettle
     }
-
+    
     enum TutorialAction {
         case none
         case navigateToProfile
         case navigateToPeople
         case navigateToReview
         case navigateToSettle
+        case highlightPayAndRequestStates
     }
 }
 
@@ -61,71 +65,104 @@ class TutorialManager: ObservableObject {
     @Published var isActive = false
     @Published var currentStepIndex = 0
 
-    // Persisted via AppStorage so tutorial only auto-starts once
     @AppStorage("hasAutoStartedOnce") var hasAutoStartedOnce = false
     @AppStorage("hasSeenTutorial") var hasCompletedTutorial = false
 
-    // Signal buses
     @Published var shouldOpenBreakdownSheet = false
     @Published var shouldAutoApplyBreakdown = false
     @Published var shouldTriggerSplitDemo = false
+    @Published var shouldShowPaywallAfterTutorial = false
 
-    // Single-target spotlight frame (most steps)
     @Published var spotlightFrame: CGRect = .zero
-
-    // Multi-target spotlight frames keyed by target.
     @Published var spotlightFrames: [TutorialStep.TutorialTarget: CGRect] = [:]
-
-    // Tick counter — incremented on every registerFrame call so the overlay
-    // re-renders even when SwiftUI's dict-diffing misses the mutation.
     @Published var frameUpdateTick: Int = 0
-
-    // FIX: Raised to true while Router is mid-flight popping Review and pushing
-    // Settle. complete() is a no-op while this is true, preventing ReviewView's
-    // onDisappear from killing the tutorial during the transition.
     @Published var isNavigatingToSettle: Bool = false
+    
+    // Click animation properties
+    @Published var showClickAnimation = false
+    @Published var clickAnimationPosition: CGPoint = .zero
     let steps: [TutorialStep] = [
-        TutorialStep(title: "Welcome to Dutchie",
-                     description: "Hi, I'm Taehoon Kang, Founder of Dutchie. Let me show you how easy it is to split bills with friends!",
-                     targetView: .fullScreen, action: .none),
-
-        TutorialStep(title: "Add Your Expenses",
-                     description: "Upload transactions by taking a screenshot, or upload a receipt by taking a picture with your camera or selecting one from your photos. You can also use Manual Entry below to type expenses without a receipt.",
-                     targetView: .uploadAndManual, action: .none),
-
-        TutorialStep(title: "Add Payment Methods",
-                     description: "This is your profile. We recommend adding your Venmo username and Zelle QR code. It makes it super convenient for friends to pay you in a single tap.",
-                     targetView: .paymentMethods, action: .navigateToProfile),
-
-        TutorialStep(title: "Add People to Your Split",
-                     description: "Add everyone you're splitting with. Tap Import from Contacts to pull friends directly from your phone.",
-                     targetView: .peopleAddContact, action: .navigateToPeople),
-
-        TutorialStep(title: "Review Your Receipt",
-                     description: "Your receipt is ready. Each transaction shows who paid and how it is split.",
-                     targetView: .reviewTransaction, action: .navigateToReview),
-
-        TutorialStep(title: "Receipt Breakdown",
-                     description: "We detected all 5 items from your receipt. These will be split individually so each person pays only for what they ordered.",
-                     targetView: .breakdownConfirm, action: .none),
-
-        TutorialStep(title: "Share and Settle Up",
-                     description: "Dutchie calculates the minimum payments needed. Tap Share to send requests with Venmo and Zelle links or tap the message icon to text someone directly.",
-                     targetView: .settleAll, action: .navigateToSettle),
-
-        TutorialStep(title: "You're All Set",
-                     description: "Start by adding your Venmo username and Zelle QR code so friends can pay you easily.",
-                     targetView: .paymentMethods, action: .navigateToProfile)
+        // Step 0 - Welcome
+        TutorialStep(
+            title: "Welcome to Dutch",
+            description: "Hi, I'm Taehoon Kang, Founder of Dutch. Let me show you how easy it is to split bills with friends!",
+            targetView: .fullScreen,
+            action: .none
+        ),
+        
+        // Step 1 - Upload
+        TutorialStep(
+            title: "Add Your Expenses",
+            description: "Upload transactions by taking a screenshot, snapping a receipt, or selecting one from your photos. You can also use Manual Entry to type expenses.",
+            targetView: .uploadAndManual,
+            action: .none
+        ),
+        
+        // Step 2 - People (skips profile)
+        TutorialStep(
+            title: "Add People to Your Split",
+            description: "Add everyone you're splitting with. Tap Import from Contacts to quickly bring in your friends.",
+            targetView: .peopleAddContact,
+            action: .navigateToPeople
+        ),
+        
+        // Step 3 - Review
+        TutorialStep(
+            title: "Review Your Receipt",
+            description: "Your receipt is ready. Each transaction shows who paid and how it is split.",
+            targetView: .reviewTransaction,
+            action: .navigateToReview
+        ),
+        
+        // Step 4 - Breakdown
+        TutorialStep(
+            title: "Receipt Breakdown",
+            description: "We detected all items from your receipt. Each item can be split individually so everyone only pays for what they ordered.",
+            targetView: .breakdownConfirm,
+            action: .none
+        ),
+        
+        // Step 5: Assign to One Person
+        TutorialStep(
+            title: "Assign to One Person",
+            description: "All items start split with everyone. Tap a person, then tap an item to assign it only to them.",
+            targetView: .quickAssignBar,
+            action: .none
+        ),
+        
+        // Step 6: Quick Mode + Select/Deselect All (COMBINED)
+        TutorialStep(
+            title: "Speed Mode & Bulk Actions",
+            description: "Toggle Speed Mode to see all items at once for rapid assignment. Use Select All or Deselect All to quickly apply or clear assignments for all items.",
+            targetView: .quickAssignBar,
+            action: .navigateToSettle
+        ),
+        
+        // Step 7 - Settle
+        TutorialStep(
+            title: "Pay and Request Money",
+            description: "We've set up both flows for when you owe money and when others owe you. Just tap Request to send it. If your friend downloads Dutch, you can pay directly with Venmo or Zelle in one tap.",
+            targetView: .settleAll,
+            action: .none
+        ),
+        
+        // Step 8 - Profile
+        TutorialStep(
+            title: "You're All Set",
+            description: "Add your Venmo username and Zelle QR code so friends can pay you in one tap.",
+            targetView: .paymentMethods,
+            action: .navigateToProfile
+        )
     ]
     
-
+ 
     func steps(for context: TutorialViewContext) -> [Int] {
         switch context {
         case .upload:   return [0, 1]
-        case .profile:  return [2, 7]
-        case .people:   return [3]
-        case .review:   return [4, 5]
-        case .settle:   return [6]
+        case .profile:  return [8]  // Changed from 9
+        case .people:   return [2]
+        case .review:   return [3, 4, 5, 6]
+        case .settle:   return [7]  // Changed from 8
         }
     }
 
@@ -148,7 +185,10 @@ class TutorialManager: ObservableObject {
 
     var isMultiSpotlight: Bool {
         guard let step = currentStep else { return false }
-        return step.targetView == .settleAll || step.targetView == .uploadAndManual
+        return step.targetView == .settleAll ||
+               step.targetView == .uploadAndManual ||
+               step.targetView == .groupModeSettle ||
+               step.targetView == .paymentMethods
     }
 
     func registerFrame(_ frame: CGRect, for target: TutorialStep.TutorialTarget) {
@@ -165,7 +205,6 @@ class TutorialManager: ObservableObject {
     var activeMultiFrames: [CGRect] {
         guard isMultiSpotlight, let step = currentStep else { return [] }
 
-        // Step 1: Upload section + Manual entry
         if step.targetView == .uploadAndManual {
             return [
                 spotlightFrames[.uploadSection],
@@ -173,18 +212,32 @@ class TutorialManager: ObservableObject {
             ].compactMap { $0 }.filter { $0 != .zero }
         }
 
-        // Step 6: Settle payment buttons
         if step.targetView == .settleAll {
             return [
+                spotlightFrames[.settleRequest],
+                spotlightFrames[.settlePayment]
+            ].compactMap { $0 }.filter { $0 != .zero }
+        }
+        
+        // Payment methods spotlight (Venmo + Zelle)
+        if step.targetView == .paymentMethods {
+            return [
+                spotlightFrames[.settlePayment],  // Venmo
+                spotlightFrames[.settleRequest]   // Zelle
+            ].compactMap { $0 }.filter { $0 != .zero }
+        }
+
+        // Old settle logic for single spotlight
+        if step.targetView == .groupModeSettle {
+            return [
                 spotlightFrames[.settlePayment],
-                spotlightFrames[.shareButton],
-                spotlightFrames[.messageIcon]
+                spotlightFrames[.settleRequest]
             ].compactMap { $0 }.filter { $0 != .zero }
         }
 
         return []
     }
-
+    
     // MARK: - Lifecycle
 
     func start() {
@@ -197,55 +250,99 @@ class TutorialManager: ObservableObject {
         shouldOpenBreakdownSheet = false
         shouldAutoApplyBreakdown = false
         shouldTriggerSplitDemo = false
+        shouldShowPaywallAfterTutorial = false
+        showClickAnimation = false
         hasAutoStartedOnce = true
         setupTutorialData()
     }
 
     func nextStep() {
-        // Step 5 (breakdown confirm) — trigger auto-apply and let the breakdown
-        // sheet's completion handler call advanceToPostBreakdown()
-        if currentStepIndex == 5 {
+        print("🎯 Tutorial nextStep called - current: \(currentStepIndex), active: \(isActive)")
+        
+        // Step 4 (breakdown confirm) — trigger auto-apply
+        if currentStepIndex == 4 {
             spotlightFrame = .zero
             shouldAutoApplyBreakdown = true
             return
         }
-
-        // Step 6 (settle) — pop settle back to upload root, then open profile for step 7.
-        // The user stays in profile after tapping "Get Started"; closing profile
-        // naturally lands them on UploadView.
-        if currentStepIndex == 6 {
+        
+        // Step 5 (Quick Mode demo) - stay on review, just advance
+        if currentStepIndex == 5 {
             spotlightFrame = .zero
-            spotlightFrames = [:]
-
-            // Reset nav stack to UploadView (no animation needed — profile sheet
-            // will cover it immediately)
-            router?.resetToUpload()
-
-            // Small delay so the stack reset settles before the sheet appears
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-                guard let self = self else { return }
-                withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-                    self.currentStepIndex = 7
-                }
-                self.router?.showProfile = true
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                currentStepIndex += 1
+            }
+            print("🎯 Advanced to step \(currentStepIndex)")
+            // Re-register spotlight for quick assign bar
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                self.frameUpdateTick += 1
             }
             return
         }
+        
+        // Step 6 (combined Quick Mode + Select/Deselect) - navigate to settle after animation completes
+        if currentStepIndex == 6 {
+            spotlightFrame = .zero
+            spotlightFrames = [:]
+            
+            // Navigate to settle for step 7
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                guard let self = self else { return }
+                self.router?.navigateToSettle()
+                
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                        self.currentStepIndex = 7
+                    }
+                    
+                    // Force frame refresh AFTER layout
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                        self.frameUpdateTick += 1
+                    }
+                }
+            }
+            return
+        }
+        
+        // Step 7 (settle) — pop settle back to upload root, then open profile for step 8
+        if currentStepIndex == 7 {
+            spotlightFrame = .zero
+            spotlightFrames = [:]
+     
+            router?.resetToUpload()
+     
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                guard let self = self else { return }
+                self.router?.presentProfile()
 
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                        self.currentStepIndex = 8
+                    }
+                    
+                    // Force frame refresh AFTER layout
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                        self.frameUpdateTick += 1
+                    }
+                }
+            }
+            return
+        }
+     
         spotlightFrame = .zero
-
+     
         let nextIndex = currentStepIndex + 1
-
-        // Only wipe multi-frames when NOT landing on step 6.
-        if nextIndex != 6 {
+     
+        // Don't clear spotlightFrames for step 7 (settle) or step 8 (profile)
+        if nextIndex != 7 && nextIndex != 8 {
             spotlightFrames = [:]
         }
-
+     
         if nextIndex < steps.count {
             withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
                 currentStepIndex = nextIndex
             }
-            if nextIndex == 5 {
+            if nextIndex == 4 {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
                     self?.shouldOpenBreakdownSheet = true
                 }
@@ -258,44 +355,61 @@ class TutorialManager: ObservableObject {
             complete()
         }
     }
-
+    
+    
+    
     func advanceToPostBreakdown() {
         spotlightFrame = .zero
-        // Do NOT clear spotlightFrames — keep pre-registered settle frames.
 
-        // FIX: Raise guard BEFORE router navigation so any onDisappear that
-        // fires during the pop+push cannot call complete() prematurely.
         isNavigatingToSettle = true
 
         withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-            currentStepIndex = 6
+            currentStepIndex = 5
         }
 
-        router?.handleTutorialNavigation(for: 6)
+        // Navigate to review to show the quick assign bar
+        router?.handleTutorialNavigation(for: 5)
 
-        // Lower guard after the navigation animation fully settles.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
             self?.isNavigatingToSettle = false
         }
     }
 
     func skip() {
-        // Intentional user action — bypass navigation guard.
         isNavigatingToSettle = false
         hasCompletedTutorial = true
-        complete()
+        
+        // Clear tutorial data first
+        clearTutorialData()
+        
+        // Reset all tutorial state
+        spotlightFrame = .zero
+        spotlightFrames = [:]
+        frameUpdateTick = 0
+        isNavigatingToSettle = false
+        shouldOpenBreakdownSheet = false
+        shouldAutoApplyBreakdown = false
+        shouldTriggerSplitDemo = false
+        showClickAnimation = false
+        shouldShowPaywallAfterTutorial = true
+        
+        // Navigate to upload root
+        router?.resetToUpload()
+        
+        // Complete the tutorial
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+            isActive = false
+            hasCompletedTutorial = true
+        }
     }
+    
 
     func complete() {
-        // FIX: Suppress if mid-navigation. ReviewView's onDisappear (fired when
-        // Router pops it) would otherwise land here and kill the tutorial before
-        // SettleShareView appears.
         guard !isNavigatingToSettle else {
             print("complete() suppressed — navigation to settle in progress")
             return
         }
 
-        // Clear all mock tutorial data so it doesn't bleed into real sessions.
         clearTutorialData()
 
         spotlightFrame = .zero
@@ -305,10 +419,12 @@ class TutorialManager: ObservableObject {
         shouldOpenBreakdownSheet = false
         shouldAutoApplyBreakdown = false
         shouldTriggerSplitDemo = false
+        showClickAnimation = false
+        shouldShowPaywallAfterTutorial = true
 
         withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
             isActive = false
-            hasCompletedTutorial = true  // persist so it won't auto-start again
+            hasCompletedTutorial = true
         }
     }
 
@@ -322,18 +438,41 @@ class TutorialManager: ObservableObject {
         shouldOpenBreakdownSheet = false
         shouldAutoApplyBreakdown = false
         shouldTriggerSplitDemo = false
+        shouldShowPaywallAfterTutorial = false
+        showClickAnimation = false
+    }
+    
+    // MARK: - Click Animation Helper
+    
+    func showClickAnimation(at position: CGPoint) {
+        clickAnimationPosition = position
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
+            showClickAnimation = true
+        }
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            withAnimation(.easeOut(duration: 0.3)) {
+                self?.showClickAnimation = false
+            }
+        }
     }
 
     // MARK: - Tutorial Data
 
     func setupTutorialData() {
         guard let appState = appState else { return }
+
+        // The app tutorial is always a normal split-mode demo. If the user had
+        // Group Mode active, turn it off so mock Alex and the tutorial split
+        // state are never replaced by group members.
+        GroupManager.shared.disableGroupMode()
+
         appState.transactions.removeAll()
         appState.uploadedReceipts.removeAll()
 
-        if appState.people.count == 1 {
-            appState.people.append(Person(name: "Alex", isCurrentUser: false))
-        }
+        // Always reset to only Alex — clears any stale people from previous sessions
+        appState.people.removeAll { !$0.isCurrentUser }
+        appState.people.append(Person(name: "Alex", isCurrentUser: false))
         guard let currentUser = appState.people.first(where: { $0.isCurrentUser }) else { return }
 
         let sampleImage = createSampleReceiptImage()
@@ -355,18 +494,14 @@ class TutorialManager: ObservableObject {
         print("Tutorial data ready: 1 transaction, \(appState.people.count) people")
     }
 
-    /// Wipes all mock data injected by setupTutorialData() so the user starts
-    /// a real session on a clean slate after the tutorial completes or is skipped.
     private func clearTutorialData() {
         guard let appState = appState else { return }
 
-        // Remove all tutorial-generated transactions and receipts
         appState.transactions.removeAll()
         appState.uploadedReceipts.removeAll()
         appState.uploadedImages.removeAll()
         appState.manualTransactions.removeAll()
 
-        // Remove Alex (the mock tutorial person) but keep the current user
         appState.people.removeAll { !$0.isCurrentUser }
 
         print("Tutorial data cleared — app state is clean for real use")
@@ -472,36 +607,54 @@ struct TutorialOverlay: View {
                    let step = tutorialManager.currentStep,
                    tutorialManager.isCurrentStep(in: context) {
 
-                    if step.targetView == .settleAll || step.targetView == .uploadAndManual {
-                        multiSpotlightOverlay
-                            .allowsHitTesting(true)
-                            .zIndex(1)
+                    Color.black.opacity(0.001)
+                        .contentShape(Rectangle())
+                        .allowsHitTesting(true)
+                        .zIndex(0)
 
-                        if step.targetView == .uploadAndManual {
-                            VStack {
-                                Spacer()
-                                tutorialCard(step: step)
-                                    .padding(.horizontal, 20)
-                                    .padding(.bottom, 44)
+                    // Only show dark overlay for specific contexts
+                    if context == .upload || context == .people || context == .settle || context == .profile {
+                        if step.targetView == .settleAll || step.targetView == .uploadAndManual {
+                            multiSpotlightOverlay
+                                .allowsHitTesting(true)
+                                .zIndex(1)
+
+                            if step.targetView == .uploadAndManual {
+                                VStack {
+                                    Spacer()
+                                    tutorialCard(step: step)
+                                        .padding(.horizontal, 20)
+                                        .padding(.bottom, 44)
+                                }
+                                .zIndex(3)
+                            } else {
+                                VStack {
+                                    tutorialCard(step: step)
+                                        .padding(.horizontal, 20)
+                                        .padding(.top, 56)
+                                    Spacer()
+                                }
+                                .zIndex(3)
                             }
-                            .zIndex(3)
+
                         } else {
-                            VStack {
-                                tutorialCard(step: step)
-                                    .padding(.horizontal, 20)
-                                    .padding(.top, 56)
-                                Spacer()
-                            }
-                            .zIndex(3)
+                            overlayWithCutout(step: step)
+                                .allowsHitTesting(true)
+                                .zIndex(1)
+
+                            tutorialCardPositioned(step: step, in: geometry)
+                                .zIndex(3)
                         }
-
                     } else {
-                        overlayWithCutout(step: step)
-                            .allowsHitTesting(true)
-                            .zIndex(1)
-
+                        // No dark overlay for review context - just tutorial card
                         tutorialCardPositioned(step: step, in: geometry)
                             .zIndex(3)
+                    }
+                    
+                    // Add click animation overlay
+                    if tutorialManager.showClickAnimation {
+                        ClickAnimationView(position: tutorialManager.clickAnimationPosition)
+                            .zIndex(5)
                     }
                 }
             }
@@ -528,25 +681,285 @@ struct TutorialOverlay: View {
         let sf           = tutorialManager.spotlightFrame
         let screenHeight = geometry.size.height
         let inBottomHalf = sf != .zero && sf.midY > screenHeight / 2
-
-        let forcedBottom: [TutorialStep.TutorialTarget] = [.uploadSection]
-        let forcedTop: [TutorialStep.TutorialTarget]    = [.nextButton, .continueButton, .breakdownConfirm, .peopleAddContact]
-
-        if forcedBottom.contains(step.targetView) || (!forcedTop.contains(step.targetView) && !inBottomHalf) {
+     
+        // Force bottom placement for these steps
+        let forcedBottom: [TutorialStep.TutorialTarget] = [
+            .uploadSection,
+            .peopleAddContact,
+            .quickAssignBar
+        ]
+        
+        // Force top placement
+        let forcedTop: [TutorialStep.TutorialTarget] = [.nextButton, .continueButton]
+        
+        // Special positioning for breakdown - place it lower to show items with compact card
+        if step.targetView == .breakdownConfirm {
+            VStack {
+                compactTutorialCard(step: step)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 450)
+                Spacer()
+            }
+        }
+        // Special card for Step 7 (Settle) with Group Mode example
+        else if tutorialManager.currentStepIndex == 7 && context == .settle {
+            VStack {
+                tutorialCardWithGroupModeExample(step: step)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 60)
+                Spacer()
+            }
+        }
+        // Bottom placement for specified targets (includes all Quick Mode steps)
+        else if forcedBottom.contains(step.targetView) || (!forcedTop.contains(step.targetView) && !inBottomHalf) {
             VStack {
                 Spacer()
                 tutorialCard(step: step).padding(.horizontal, 20).padding(.bottom, 44)
             }
-        } else {
+        }
+        // Top placement for others
+        else {
             VStack {
                 tutorialCard(step: step)
                     .padding(.horizontal, 20)
-                    .padding(.top, step.targetView == .breakdownConfirm ? 56 : 60)
+                    .padding(.top, 60)
                 Spacer()
             }
         }
     }
+    
+    
+    private func compactTutorialCard(step: TutorialStep) -> some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 6) {
+                ForEach(0..<tutorialManager.totalSteps, id: \.self) { index in
+                    Capsule()
+                        .fill(index <= tutorialManager.currentStepIndex
+                              ? Color(red: 0.15, green: 0.15, blue: 0.15) : Color(red: 0.15, green: 0.15, blue: 0.15).opacity(0.18))
+                        .frame(height: 3).frame(maxWidth: .infinity)
+                }
+            }
 
+            Text(step.title)
+                .font(.system(size: 16, weight: .bold))
+                .foregroundColor(Color(red: 0.15, green: 0.15, blue: 0.15))
+                .multilineTextAlignment(.center)
+                .lineLimit(1)
+
+            Text(step.description)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(Color(red: 0.15, green: 0.15, blue: 0.15).opacity(0.88))
+                .multilineTextAlignment(.center)
+                .lineSpacing(1)
+                .lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 10) {
+                Button(action: {
+                    HapticManager.impact(style: .light)
+                    tutorialManager.skip()
+                }) {
+                    Text("Skip")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(Color(red: 0.15, green: 0.15, blue: 0.15).opacity(0.7))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(Color(red: 0.96, green: 0.96, blue: 0.94))
+                        .cornerRadius(10)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(Color(red: 0.15, green: 0.15, blue: 0.15).opacity(0.2), lineWidth: 1)
+                        )
+                }
+                .buttonStyle(ScaleButtonStyle())
+
+                Button(action: {
+                    HapticManager.impact(style: .medium)
+                    tutorialManager.nextStep()
+                }) {
+                    HStack(spacing: 5) {
+                        Text("Next").font(.system(size: 12, weight: .bold))
+                        Image(systemName: "arrow.right").font(.system(size: 10, weight: .bold))
+                    }
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(Color(red: 0.15, green: 0.15, blue: 0.15))
+                    .cornerRadius(10)
+                }
+                .buttonStyle(ScaleButtonStyle())
+            }
+
+            Text("\(tutorialManager.currentStepIndex + 1) of \(tutorialManager.totalSteps)")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(Color(red: 0.15, green: 0.15, blue: 0.15).opacity(0.5))
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color(red: 0.96, green: 0.96, blue: 0.94))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(Color(red: 0.15, green: 0.15, blue: 0.15), lineWidth: 1.5)
+                )
+                .shadow(color: Color.black.opacity(0.2), radius: 20, y: 5)
+        )
+    }
+    
+    
+    private func tutorialCardWithGroupModeExample(step: TutorialStep) -> some View {
+        VStack(spacing: 16) {
+            // Progress bar
+            HStack(spacing: 6) {
+                ForEach(0..<tutorialManager.totalSteps, id: \.self) { index in
+                    Capsule()
+                        .fill(index <= tutorialManager.currentStepIndex
+                              ? Color(red: 0.15, green: 0.15, blue: 0.15) : Color(red: 0.15, green: 0.15, blue: 0.15).opacity(0.18))
+                        .frame(height: 4).frame(maxWidth: .infinity)
+                }
+            }
+
+            Text(step.title)
+                .font(.system(size: 20, weight: .bold)).foregroundColor(Color(red: 0.15, green: 0.15, blue: 0.15))
+                .multilineTextAlignment(.center).lineLimit(2)
+
+            Text(step.description)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundColor(Color(red: 0.15, green: 0.15, blue: 0.15).opacity(0.88))
+                .multilineTextAlignment(.center).lineSpacing(2).lineLimit(5)
+                .fixedSize(horizontal: false, vertical: true)
+
+            // Group Mode Payment Example Card
+            VStack(spacing: 12) {
+                Text("In Group Mode:")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(Color(red: 0.15, green: 0.15, blue: 0.15).opacity(0.55))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                
+                // Mock payment card
+                VStack(spacing: 12) {
+                    HStack(spacing: 12) {
+                        Circle()
+                            .fill(Color(red: 0.15, green: 0.15, blue: 0.15))
+                            .frame(width: 44, height: 44)
+                            .overlay(
+                                Text("A")
+                                    .font(.system(size: 18, weight: .bold))
+                                    .foregroundColor(.white)
+                            )
+                        
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Alex")
+                                .font(.system(size: 15, weight: .bold))
+                                .foregroundColor(Color(red: 0.15, green: 0.15, blue: 0.15))
+                            Text("You owe")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(Color(red: 0.15, green: 0.15, blue: 0.15).opacity(0.58))
+                        }
+                        
+                        Spacer()
+                        
+                        Text("$23.14")
+                            .font(.system(size: 24, weight: .bold))
+                            .foregroundColor(Color(red: 0.15, green: 0.15, blue: 0.15))
+                    }
+                    
+                    // Payment buttons
+                    HStack(spacing: 8) {
+                        HStack(spacing: 6) {
+                            VenmoIcon(size: 14)
+                            Text("VENMO")
+                                .font(.system(size: 12, weight: .bold))
+                                .tracking(0.5)
+                        }
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(Color(red: 0.15, green: 0.15, blue: 0.15))
+                        .cornerRadius(8)
+                        
+                        HStack(spacing: 6) {
+                            ZelleIcon(size: 14)
+                            Text("ZELLE")
+                                .font(.system(size: 12, weight: .bold))
+                                .tracking(0.5)
+                        }
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(Color(red: 0.15, green: 0.15, blue: 0.15))
+                        .cornerRadius(8)
+                    }
+                }
+                .padding(14)
+                .background(Color(red: 0.96, green: 0.96, blue: 0.94))
+                .cornerRadius(12)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(Color(red: 0.15, green: 0.15, blue: 0.15).opacity(0.18), lineWidth: 1.5)
+                )
+                
+                // Educational message
+                HStack(spacing: 8) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 14))
+                        .foregroundColor(Color(red: 0.15, green: 0.15, blue: 0.15))
+                    
+                    Text("But if your friend has Dutch, it's so much easier for you to pay and your friend to receive!")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(Color(red: 0.15, green: 0.15, blue: 0.15).opacity(0.78))
+                        .lineSpacing(2)
+                }
+                .padding(12)
+                .background(Color(red: 0.15, green: 0.15, blue: 0.15).opacity(0.10))
+                .cornerRadius(10)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color(red: 0.15, green: 0.15, blue: 0.15).opacity(0.22), lineWidth: 1)
+                )
+            }
+            .padding(.vertical, 8)
+
+            // Buttons
+            HStack(spacing: 12) {
+                Button(action: { HapticManager.impact(style: .light); tutorialManager.skip() }) {
+                    Text("Skip")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(Color(red: 0.15, green: 0.15, blue: 0.15).opacity(0.7))
+                        .frame(maxWidth: .infinity).padding(.vertical, 14)
+                        .background(Color(red: 0.96, green: 0.96, blue: 0.94)).cornerRadius(12)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color(red: 0.15, green: 0.15, blue: 0.15).opacity(0.2), lineWidth: 1)
+                        )
+                }
+                .buttonStyle(ScaleButtonStyle())
+
+                Button(action: { HapticManager.impact(style: .medium); tutorialManager.nextStep() }) {
+                    HStack(spacing: 6) {
+                        Text("Next").font(.system(size: 14, weight: .bold))
+                        Image(systemName: "arrow.right").font(.system(size: 11, weight: .bold))
+                    }
+                    .foregroundColor(.white).frame(maxWidth: .infinity).padding(.vertical, 14)
+                    .background(Color(red: 0.15, green: 0.15, blue: 0.15)).cornerRadius(12)
+                    .shadow(color: Color(red: 0.15, green: 0.15, blue: 0.15).opacity(0.25), radius: 8, y: 4)
+                }
+                .buttonStyle(ScaleButtonStyle())
+            }
+
+            Text("\(tutorialManager.currentStepIndex + 1) of \(tutorialManager.totalSteps)")
+                .font(.system(size: 11, weight: .medium)).foregroundColor(Color(red: 0.15, green: 0.15, blue: 0.15).opacity(0.5))
+        }
+        .padding(20)
+        .background(
+            RoundedRectangle(cornerRadius: 20)
+                .fill(Color(red: 0.96, green: 0.96, blue: 0.94))
+                .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color(red: 0.15, green: 0.15, blue: 0.15), lineWidth: 1.5))
+                .shadow(color: Color.black.opacity(0.2), radius: 20, y: 6)
+        )
+    }
+    
+    
     private func overlayWithCutout(step: TutorialStep) -> some View {
         let pad: CGFloat = 12
         let frame   = tutorialManager.spotlightFrame
@@ -568,7 +981,7 @@ struct TutorialOverlay: View {
                 ForEach(0..<tutorialManager.totalSteps, id: \.self) { index in
                     Capsule()
                         .fill(index <= tutorialManager.currentStepIndex
-                              ? Color.accentColor : Color.white.opacity(0.25))
+                              ? Color(red: 0.15, green: 0.15, blue: 0.15) : Color(red: 0.15, green: 0.15, blue: 0.15).opacity(0.18))
                         .frame(height: 4).frame(maxWidth: .infinity)
                 }
             }
@@ -578,13 +991,17 @@ struct TutorialOverlay: View {
             }
 
             Text(step.title)
-                .font(.system(size: 20, weight: .bold)).foregroundColor(.white)
-                .multilineTextAlignment(.center).lineLimit(2)
+                .font(.system(size: 20, weight: .bold))
+                .foregroundColor(Color(red: 0.15, green: 0.15, blue: 0.15))
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
 
             Text(step.description)
                 .font(.system(size: 14, weight: .medium))
-                .foregroundColor(.white.opacity(0.88))
-                .multilineTextAlignment(.center).lineSpacing(2).lineLimit(5)
+                .foregroundColor(Color(red: 0.15, green: 0.15, blue: 0.15).opacity(0.88))
+                .multilineTextAlignment(.center)
+                .lineSpacing(2)
+                .lineLimit(5)
                 .fixedSize(horizontal: false, vertical: true)
 
             HStack(spacing: 12) {
@@ -597,55 +1014,77 @@ struct TutorialOverlay: View {
                             Text("Get Started").font(.system(size: 15, weight: .bold))
                             Image(systemName: "arrow.right").font(.system(size: 12, weight: .bold))
                         }
-                        .foregroundColor(.white).frame(maxWidth: .infinity).padding(.vertical, 14)
-                        .background(Color.accentColor).cornerRadius(12)
-                        .shadow(color: Color.accentColor.opacity(0.4), radius: 8, y: 4)
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(Color(red: 0.15, green: 0.15, blue: 0.15))
+                        .cornerRadius(12)
+                        .shadow(color: Color(red: 0.15, green: 0.15, blue: 0.15).opacity(0.25), radius: 8, y: 4)
                     }
                     .buttonStyle(ScaleButtonStyle())
                 } else {
-                    Button(action: { HapticManager.impact(style: .light); tutorialManager.skip() }) {
+                    Button(action: {
+                        HapticManager.impact(style: .light)
+                        tutorialManager.skip()
+                    }) {
                         Text("Skip")
                             .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(.white.opacity(0.7))
-                            .frame(maxWidth: .infinity).padding(.vertical, 14)
-                            .background(Color.white.opacity(0.15)).cornerRadius(12)
+                            .foregroundColor(Color(red: 0.15, green: 0.15, blue: 0.15).opacity(0.7))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 14)
+                            .background(Color(red: 0.96, green: 0.96, blue: 0.94))
+                            .cornerRadius(12)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12)
+                                    .stroke(Color(red: 0.15, green: 0.15, blue: 0.15).opacity(0.2), lineWidth: 1)
+                            )
                     }
                     .buttonStyle(ScaleButtonStyle())
 
-                    Button(action: { HapticManager.impact(style: .medium); tutorialManager.nextStep() }) {
+                    Button(action: {
+                        HapticManager.impact(style: .medium)
+                        tutorialManager.nextStep()
+                    }) {
                         HStack(spacing: 6) {
                             Text(nextButtonLabel).font(.system(size: 14, weight: .bold))
                             Image(systemName: "arrow.right").font(.system(size: 11, weight: .bold))
                         }
-                        .foregroundColor(.white).frame(maxWidth: .infinity).padding(.vertical, 14)
-                        .background(Color.accentColor).cornerRadius(12)
-                        .shadow(color: Color.accentColor.opacity(0.4), radius: 8, y: 4)
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(Color(red: 0.15, green: 0.15, blue: 0.15))
+                        .cornerRadius(12)
+                        .shadow(color: Color(red: 0.15, green: 0.15, blue: 0.15).opacity(0.3), radius: 8, y: 4)
                     }
                     .buttonStyle(ScaleButtonStyle())
                 }
             }
 
             Text("\(tutorialManager.currentStepIndex + 1) of \(tutorialManager.totalSteps)")
-                .font(.system(size: 11, weight: .medium)).foregroundColor(.white.opacity(0.5))
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(Color(red: 0.15, green: 0.15, blue: 0.15).opacity(0.5))
         }
         .padding(20)
         .background(
-            RoundedRectangle(cornerRadius: 20)
-                .fill(Color(red: 0.12, green: 0.12, blue: 0.14))
-                .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.white.opacity(0.1), lineWidth: 1))
-                .shadow(color: Color.black.opacity(0.5), radius: 24, y: 6)
-        )
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color(red: 0.96, green: 0.96, blue: 0.94))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(Color(red: 0.15, green: 0.15, blue: 0.15), lineWidth: 1.5)
+                )
+                .shadow(color: Color.black.opacity(0.2), radius: 20, y: 6)
+            )
         .overlay(alignment: .top) {
             if tutorialManager.currentStepIndex == 0 {
                 AnimatedProfileIconOverlay()
             }
         }
     }
-
+    
     private var nextButtonLabel: String {
         switch tutorialManager.currentStepIndex {
         case 0:  return "Start"
-        case 5:  return "Continue"
+        case 4:  return "Continue"
         default: return "Next"
         }
     }
@@ -655,80 +1094,20 @@ struct AnimatedProfileIconOverlay: View {
     @State private var scale: CGFloat = 1.0
     @State private var yOffset: CGFloat = -100
     @State private var showCircleOverlay = true
-    @State private var showingLottie = true
 
     var body: some View {
-        let screenWidth = UIScreen.main.bounds.width
-        let targetSize = screenWidth * 0.875
-        let maxScale = targetSize / 56
-
         ZStack {
-            // Lottie plays through the ENTIRE animation — only swapped to
-            // picture AFTER the zoom-out completes.
-            if showingLottie {
-                TutorialLottieView(jsonName: "Video")
-                    .frame(width: 56, height: 56)
-                    .scaleEffect(1.3)
-                    .clipShape(Circle())
-                    .scaleEffect(scale)
-            } else {
-                Image("Picture")
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: 56, height: 56)
-                    .clipShape(Circle())
-                    .scaleEffect(scale)
-            }
-
-            if showCircleOverlay {
-                Circle()
-                    .stroke(Color.accentColor.opacity(0.4), lineWidth: 2)
-                    .frame(width: 56, height: 56)
-                    .scaleEffect(scale)
-            }
+            Image("Picture")
+                .resizable()
+                .scaledToFill()
+                .frame(width: 56, height: 56)
+                .clipShape(Circle())
+ 
+            Circle()
+                .stroke(Color(red: 0.15, green: 0.15, blue: 0.15).opacity(0.35), lineWidth: 2)
+                .frame(width: 56, height: 56)
         }
-        .offset(y: yOffset)
-        .onAppear {
-            let playBeforeZoom: Double  = 0.5   // video plays at icon size first
-            let zoomInDuration: Double  = 0.7   // zoom in duration
-            let holdAtPeak: Double      = 1.5   // video plays at FULL SIZE for 1.5s
-            let zoomOutDuration: Double = 0.7   // zoom out duration
-
-            // Phase 1 — video plays at normal icon size for 0.5s
-            DispatchQueue.main.asyncAfter(deadline: .now() + playBeforeZoom) {
-
-                // Hide circle stroke just before zoom
-                withAnimation(.easeOut(duration: 0.25)) {
-                    showCircleOverlay = false
-                }
-
-                // Phase 2 — zoom IN, video still playing
-                withAnimation(.spring(response: zoomInDuration, dampingFraction: 0.7)) {
-                    scale = maxScale
-                }
-
-                // Phase 3 — hold at peak for 1.5s, video keeps looping at full size
-                // (no action needed here, Lottie loops automatically)
-
-                // Phase 4 — zoom back OUT after hold
-                DispatchQueue.main.asyncAfter(deadline: .now() + zoomInDuration + holdAtPeak) {
-                    withAnimation(.spring(response: zoomOutDuration, dampingFraction: 0.7)) {
-                        scale   = 1.0
-                        yOffset = 45
-                    }
-
-                    // Phase 5 — swap Lottie → Picture once zoom-out is nearly done
-                    // At this point scale ≈ 1.0 on both branches so the swap is seamless
-                    DispatchQueue.main.asyncAfter(deadline: .now() + zoomOutDuration * 0.85) {
-                        showingLottie = false
-
-                        withAnimation(.easeIn(duration: 0.3)) {
-                            showCircleOverlay = true
-                        }
-                    }
-                }
-            }
-        }
+        .offset(y: 45)
     }
 }
 
@@ -738,53 +1117,47 @@ struct AnimatedProfileIconInCard: View {
     }
 }
 
-// MARK: - Tutorial-Specific Lottie View
-//
-// Uses a Coordinator to hold a strong reference to LottieAnimationView so
-// SwiftUI re-renders (triggered by scale/state changes) don't destroy and
-// recreate it — which would silently stop playback.
+// MARK: - Click Animation View
 
-struct TutorialLottieView: UIViewRepresentable {
-    let jsonName: String
-
-    class Coordinator {
-        let animationView: LottieAnimationView
-
-        init(jsonName: String) {
-            animationView                    = LottieAnimationView()
-            animationView.animation          = LottieAnimation.named(jsonName)
-            animationView.contentMode        = .scaleAspectFit
-            animationView.loopMode           = .loop
-            animationView.backgroundBehavior = .pauseAndRestore
-            animationView.backgroundColor    = .clear
-            animationView.play()
-            print("🎬 Lottie '\(jsonName)' started")
+struct ClickAnimationView: View {
+    let position: CGPoint
+    @State private var scale: CGFloat = 0.5
+    @State private var opacity: Double = 1.0
+    @State private var pulseScale: CGFloat = 1.0
+    
+    var body: some View {
+        ZStack {
+            // Outer expanding ring
+            Circle()
+                .stroke(Color(red: 0.15, green: 0.15, blue: 0.15).opacity(0.8), lineWidth: 4)
+                .frame(width: 60, height: 60)
+                .scaleEffect(scale)
+                .opacity(opacity * 0.6)
+            
+            // Inner solid circle with pulse
+            Circle()
+                .fill(Color(red: 0.15, green: 0.15, blue: 0.15).opacity(0.9))
+                .frame(width: 28, height: 28)
+                .scaleEffect(pulseScale)
+                .opacity(opacity)
+            
+            // Tap indicator
+            Circle()
+                .fill(Color.white)
+                .frame(width: 12, height: 12)
+                .opacity(opacity)
         }
-    }
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(jsonName: jsonName)
-    }
-
-    func makeUIView(context: Context) -> UIView {
-        let container = UIView()
-        container.backgroundColor = .clear
-
-        let av = context.coordinator.animationView
-        container.addSubview(av)
-        av.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            av.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            av.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            av.topAnchor.constraint(equalTo: container.topAnchor),
-            av.bottomAnchor.constraint(equalTo: container.bottomAnchor)
-        ])
-
-        return container
-    }
-
-    func updateUIView(_ uiView: UIView, context: Context) {
-        // Coordinator owns the animation view — nothing to update
+        .position(position)
+        .onAppear {
+            withAnimation(.easeOut(duration: 1.0)) {
+                scale = 1.8
+                opacity = 0
+            }
+            
+            withAnimation(.easeInOut(duration: 0.5).repeatCount(2, autoreverses: true)) {
+                pulseScale = 1.2
+            }
+        }
     }
 }
 
@@ -851,7 +1224,8 @@ struct TutorialMultiSpotlight: ViewModifier {
                             }
                         }
                         .onChange(of: tutorialManager.currentStepIndex) { index in
-                            guard (index == 1 || index == 6), isActive else { return }
+                            // Changed from (index == 1 || (index >= 5 && index <= 7)) to new indices
+                            guard (index == 1 || (index >= 5 && index <= 8)), isActive else { return }
                             for i in 1...20 {
                                 DispatchQueue.main.asyncAfter(deadline: .now() + Double(i) * 0.05) {
                                     let frame = geo.frame(in: .global)
@@ -864,6 +1238,7 @@ struct TutorialMultiSpotlight: ViewModifier {
             )
     }
 }
+
 
 extension View {
     func tutorialSpotlight(isHighlighted: Bool, cornerRadius: CGFloat = 16) -> some View {
@@ -883,7 +1258,7 @@ struct TutorialWelcomeView: View {
     var body: some View {
         ZStack {
             LinearGradient(
-                colors: [Color.accentColor.opacity(0.8), Color.accentColor.opacity(0.5), Color(.systemBackground)],
+                colors: [Color(red: 0.15, green: 0.15, blue: 0.15).opacity(0.88), Color(red: 0.15, green: 0.15, blue: 0.15).opacity(0.65), Color(.systemBackground)],
                 startPoint: .topLeading, endPoint: .bottomTrailing
             ).ignoresSafeArea()
 
@@ -892,10 +1267,10 @@ struct TutorialWelcomeView: View {
                 ZStack {
                     Circle().fill(Color.white).frame(width: 120, height: 120)
                         .shadow(color: Color.black.opacity(0.2), radius: 20, y: 10)
-                    Image(systemName: "person.3.fill").font(.system(size: 50)).foregroundColor(.accentColor)
+                    Image(systemName: "person.3.fill").font(.system(size: 50)).foregroundColor(Color(red: 0.15, green: 0.15, blue: 0.15))
                 }
                 VStack(spacing: 12) {
-                    Text("Welcome to Dutchie").font(.system(size: 32, weight: .bold)).foregroundColor(.white)
+                    Text("Welcome to Dutch").font(.system(size: 32, weight: .bold)).foregroundColor(.white)
                     Text("Split bills with friends effortlessly")
                         .font(.system(size: 18, weight: .medium))
                         .foregroundColor(.white.opacity(0.9)).multilineTextAlignment(.center)
@@ -904,7 +1279,7 @@ struct TutorialWelcomeView: View {
                 VStack(spacing: 14) {
                     Button(action: { HapticManager.impact(style: .medium); tutorialManager.start() }) {
                         Text("Start Tutorial")
-                            .font(.system(size: 17, weight: .bold)).foregroundColor(.accentColor)
+                            .font(.system(size: 17, weight: .bold)).foregroundColor(Color(red: 0.15, green: 0.15, blue: 0.15))
                             .frame(maxWidth: .infinity).padding(.vertical, 18).background(Color.white)
                             .cornerRadius(14).shadow(color: Color.black.opacity(0.2), radius: 12, y: 4)
                     }.buttonStyle(ScaleButtonStyle())

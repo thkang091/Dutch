@@ -9,6 +9,8 @@
 			<string>com.taehoonkang.dutchi</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
+				<string>dutch</string>
+				<string>dutchie</string>
 				<string>dutchi</string>
 			</array>
 		</dict>
@@ -17,8 +19,6 @@
 	<dict>
 		<key>NSExtensionAttributes</key>
 		<dict>
-			<key>NSExtensionActivationRule</key>
-			<string>TRUEPREDICATE</string>
 			<key>NSExtensionActivationSupportsImageWithMaxCount</key>
 			<integer>20</integer>
 		</dict>
