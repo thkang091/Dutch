@@ -6,8 +6,6 @@ The app is designed for real social spending: restaurants, groceries, shared tri
 
 ## Preview
 
-Add your main product image here after you place it in the repo:
-
 
 ![Dutch app screens](docs/images/dutch-design.jpg)
 
