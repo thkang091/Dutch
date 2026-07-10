@@ -9,7 +9,7 @@ The app is designed for real social spending: restaurants, groceries, shared tri
 Add your main product image here after you place it in the repo:
 
 ```md
-![Dutch app screens](docs/images/Dutch Design.jpg)
+![Dutch app screens](docs/images/dutch-design.jpg)
 ```
 
 
