@@ -1985,6 +1985,7 @@ function normalizeParsedReceipt(parsed) {
       printedAmount: round2(item.printedAmount),
       discountAmount: toNumber(item.discountAmount),
       discountLabel: item.discountLabel ?? null,
+      sourceText: item.sourceText ?? null,
       itemCode: item.itemCode ?? null,
       qty: toNumber(item.qty),
       unitPrice: toNumber(item.unitPrice),
@@ -2067,7 +2068,21 @@ function mergeStrayDuplicateRows(items, reqId) {
 
     foldable.sort((a, b) => b.item.printedAmount - a.item.printedAmount);
     const keeper = foldable[0];
+    const foldedEvidence = new Set();
     for (const stray of foldable.slice(1)) {
+      const evidenceKey = [
+        stray.item.name.trim().toLowerCase(),
+        round2(stray.item.printedAmount).toFixed(2),
+        String(stray.item.sourceText || "").trim().toLowerCase(),
+      ].join("|");
+      if (foldedEvidence.has(evidenceKey)) {
+        foldedAwayIdx.add(stray.idx);
+        if (reqId) {
+          console.log(`[${reqId}] Ignored duplicate stray discount evidence "${stray.item.name}" ($${stray.item.printedAmount})`);
+        }
+        continue;
+      }
+      foldedEvidence.add(evidenceKey);
       foldedAwayIdx.add(stray.idx);
       extraDiscountByIdx.set(keeper.idx, (extraDiscountByIdx.get(keeper.idx) || 0) + stray.item.printedAmount);
       if (reqId) {
