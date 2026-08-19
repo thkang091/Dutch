@@ -12,7 +12,6 @@ dotenv.config();
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "20mb" }));
 
 const PORT = Number(process.env.PORT || 3001);
 const APP_BEARER_TOKEN = process.env.APP_BEARER_TOKEN || "";
@@ -29,7 +28,10 @@ const ANALYTICS_MAX_EVENT_BYTES = Number(process.env.ANALYTICS_MAX_EVENT_BYTES |
 const ENABLE_DEBUG_RESPONSE =
   process.env.ENABLE_DEBUG_RESPONSE === "true" &&
   process.env.NODE_ENV !== "production";
-const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES || 20 * 1024 * 1024);
+const JSON_BODY_LIMIT = process.env.JSON_BODY_LIMIT || "12mb";
+app.use(express.json({ limit: JSON_BODY_LIMIT }));
+
+const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES || 8 * 1024 * 1024);
 const MAX_PDF_PAGES = Number(process.env.MAX_PDF_PAGES || 12);
 const OCR_LOW_CONFIDENCE_THRESHOLD = Number(process.env.OCR_LOW_CONFIDENCE_THRESHOLD || 0.75);
 const ALLOWED_MIME_TYPES = new Set([
@@ -46,6 +48,8 @@ const MISTRAL_OCR_TIMEOUT_MS = Number(
   process.env.MISTRAL_OCR_TIMEOUT_MS || process.env.RECEIPT_OCR_TIMEOUT_MS || 10000
 );
 const QUICK_TOTAL_TIMEOUT_MS = Number(process.env.QUICK_TOTAL_TIMEOUT_MS || 5000);
+const ENABLE_STAGED_QUICK_TOTAL = process.env.ENABLE_STAGED_QUICK_TOTAL === "true";
+const STAGED_FIRST_RESPONSE_TIMEOUT_MS = Number(process.env.STAGED_FIRST_RESPONSE_TIMEOUT_MS || 1200);
 const ENABLE_MISTRAL_WORD_CONFIDENCE = process.env.ENABLE_MISTRAL_WORD_CONFIDENCE === "true";
 const stagedReceiptJobs = new Map();
 const stagedReceiptHashIndex = new Map();
@@ -108,8 +112,8 @@ const ItemCategoryEnum = z.enum([
 ]);
 
 const ReceiptItemSchema = z.object({
-  name: z.string().describe("Item name exactly as printed on its own line"),
-  printedAmount: z.number().describe("The number printed on the item's own line, exactly as shown. Do not add or subtract anything, even if a discount line follows."),
+  name: z.string().describe("Purchased item name, merging visible continuation/modifier lines that belong to the same item"),
+  printedAmount: z.number().describe("The item's visible final line amount or line total. Use a direct quantity x unit-price calculation only when that exact formula is visibly printed on the item row."),
   discountAmount: z.number().nullable().optional().describe("Positive magnitude of a discount/savings line clearly tied to this specific item. Null if no discount line is tied to this item."),
   discountLabel: z.string().nullable().optional().describe("Visible text of the discount line tied to this item (e.g. 'INSTANT SAVINGS', 'MEMBER DISCOUNT'). Null if none."),
   itemCode: z
@@ -120,6 +124,8 @@ const ReceiptItemSchema = z.object({
   qty: z.number().nullable().optional().describe("Quantity purchased"),
   unitPrice: z.number().nullable().optional().describe("Price per unit before any discount"),
   weightLbs: z.number().nullable().optional().describe("Weight in pounds for weighted items"),
+  sourceText: z.string().nullable().optional().describe("Visible OCR text lines used for this item, if helpful for review"),
+  modifiers: z.array(z.string()).nullable().optional().describe("Visible modifiers/options/add-ons that are part of this purchased line"),
 });
 
 const MistralReceiptSchema = z.object({
@@ -710,6 +716,11 @@ function classifyReceiptUpload({ ocrText, parsed }) {
   const receiptSignalCount = receiptSignals.reduce((count, regex) => count + (regex.test(text) ? 1 : 0), 0);
   const itemCount = Array.isArray(parsed?.items) ? parsed.items.length : 0;
   const hasVisibleTotal = parsed?.grandTotal != null || parsed?.subtotal != null || /\b(?:grand\s+total|total|amount\s+due|balance\s+due)\b/.test(text);
+  const terminalAmountLineCount = String(ocrText || "")
+    .split(/\r?\n/)
+    .map(cleanOcrLine)
+    .filter(line => lastAmountNearLineEnd(line) && !summaryRoleForLine(line) && !isReceiptMetadataLine(line))
+    .length;
 
   if (statementSignals) {
     return {
@@ -732,7 +743,23 @@ function classifyReceiptUpload({ ocrText, parsed }) {
     return { ok: true, confidence: 0.82, reason: "Receipt-like item rows and totals were detected." };
   }
 
-  if (words.length < 8 || receiptSignalCount === 0) {
+  if (itemCount >= 2 && terminalAmountLineCount >= 2 && amountCount >= 3) {
+    return { ok: true, confidence: 0.78, reason: "Multiple purchased item-price rows were detected in receipt-like OCR text." };
+  }
+
+  if (terminalAmountLineCount >= 3 && amountCount >= 4 && hasVisibleTotal) {
+    return { ok: true, confidence: 0.74, reason: "Receipt-like item-price rows and a visible total were detected without relying on a fixed template." };
+  }
+
+  if (hasVisibleTotal && amountCount >= 2 && words.length >= 8 && !statementSignals) {
+    return {
+      ok: true,
+      confidence: 0.62,
+      reason: "Weak but plausible receipt evidence was detected; parse as review-required instead of rejecting the upload.",
+    };
+  }
+
+  if (words.length < 8 || (receiptSignalCount === 0 && terminalAmountLineCount < 3)) {
     return {
       ok: false,
       code: "NOT_A_RECEIPT",
@@ -1101,45 +1128,48 @@ function reconcileBankDocument(bankDocument) {
 // MISTRAL EXTRACTION PROMPT
 // ============================================================
 
-const EXTRACTION_PROMPT = `You are a receipt data extraction system. Transcribe exactly what is printed. Do not do any arithmetic yourself, discount math is handled in code after extraction.
+const EXTRACTION_PROMPT = `You are the strongest fallback receipt itemizer for a bill-splitting app.
 
-ITEMS
-- Each purchased product is one item: name (string) and printedAmount (the number printed directly on that item's own line, exactly as shown, whether or not a discount was already applied to it).
-- Never invent a printedAmount. If there is no clear price on the item's own line, do not include that item.
+Read the receipt visually and structurally. Do not assume a fixed receipt type, merchant format, column order, country, or POS template. Receipts may be restaurants, bars, cafes, grocery, retail, pharmacy, delivery, tickets, service invoices, multi-page PDFs, folded photos, screenshots, or markdown tables. Infer the layout from the visible document itself.
 
-ATTACHED DISCOUNTS
-- If a discount/savings/coupon line is clearly tied to one specific item above it (the very next line, an indented line, or a line referencing that item's SKU), set discountAmount to that line's magnitude as a positive number and discountLabel to its visible text (e.g. "INSTANT SAVINGS", "MEMBER DISCOUNT", "TPD").
-- Do not subtract discountAmount from printedAmount yourself. Report both numbers exactly as printed.
-- If a savings/discount line cannot be clearly tied to one specific item, leave discountAmount and discountLabel null on every item. Do not attach it to the wrong item and do not create a standalone item for it.
+Goal:
+- Return every purchased line that a group may need to split.
+- Preserve financial truth: never hallucinate an item or amount.
+- Prefer a complete supported itemization over a total-only parse when item rows are visible.
 
-NEVER EXTRACT THESE AS ITEMS
-- Payment methods: VISA, MASTERCARD, AMEX, DISCOVER, auth codes
-- Totals: SUBTOTAL, TOTAL, BALANCE DUE, AMOUNT DUE
-- Charges: TAX, TIP, GRATUITY, FEE, DELIVERY
-- Standalone discount lines: YOU SAVED, TOTAL SAVINGS, INSTANT SAVINGS (these belong in discountAmount on the item above them, or in orderLevelDiscount, never as their own item)
+Itemization rules:
+1. One purchased product/service/menu line = one item.
+2. Merge visible continuation lines, add-ons, modifiers, options, size/color lines, and wrapped descriptions into the parent item when they are spatially or semantically attached.
+3. Use printedAmount for the visible line total. If the row visibly shows quantity/weight x unit price but no separate extended total, you may compute printedAmount only from that directly visible formula and mention that in sourceText.
+4. Do not require the amount to be on the exact same OCR text line when layout clearly ties a following/adjacent amount to the item.
+5. Keep duplicate purchases as separate items unless the receipt visibly shows one row with quantity > 1.
+6. For quantity/weight rows, fill qty, unitPrice, and weightLbs when visible. Keep printedAmount as the extended line amount.
+7. Preserve item codes/SKUs when visible next to the item, but never use a code alone as the item name if descriptive text is visible.
 
-MULTI-LINE MERGING
-OCR often splits one item across lines. Merge into a single item:
-- "O EGGS VF PSTR RS" + "7.99 NF" -> name="EGGS VF PSTR RS", printedAmount=7.99
-- A weighted produce line split across 2-3 lines -> one item with weightLbs/unitPrice set
-- An item line immediately followed by its own discount line -> one item with discountAmount/discountLabel set, not two items
+Discounts:
+- If a discount/coupon/savings line is clearly attached to one item by adjacency, indentation, SKU/reference, or row grouping, put its positive magnitude in discountAmount and visible label in discountLabel.
+- If a discount is order-wide or only appears in the totals section, put it in orderLevelDiscount.
+- Do not output standalone savings lines as purchased items.
+- Do not subtract item discounts yourself unless the visible item row already shows the post-discount line total.
 
-WEIGHTED / MULTI-QUANTITY ITEMS
-- "APPLES 1.2 lb @ 2.99/lb  3.59" -> name="APPLES", printedAmount=3.59, qty=1.2, weightLbs=1.2, unitPrice=2.99
-- "YOGURT 4 @ 1.25" -> name="YOGURT", printedAmount=5.00, qty=4, unitPrice=1.25
+Never output these as purchased items:
+- Subtotal, total, balance due, amount due, tendered, change, cash back.
+- Tax, service charge, delivery fee, bag fee, tip, gratuity, surcharge. Put these in tax/tip/fees.
+- Payment/auth/card rows, gift card balance, rewards/points, order/table/server/check numbers, address/phone/date metadata.
+- Section headers without their own price.
 
-ITEM CODE
-- If a retailer item number or SKU is printed next to an item, extract it as itemCode (string, keep leading zeros). Otherwise null. Never invent one.
+Totals:
+- Extract subtotal, tax, tip, fees, orderLevelDiscount, grandTotal only when visibly supported.
+- For grandTotal choose the final payable/charged amount, not subtotal, tax, savings, tendered cash, change, authorization amount, or remaining gift card balance.
+- If multiple final totals appear (cash/non-cash/card total), choose the one most consistent with the actual amount due/charged and explain ambiguity in notes.
 
-ORDER-LEVEL FIELDS
-- subtotal, tax, tip, fees: only if explicitly printed, otherwise null.
-- orderLevelDiscount: order-wide discounts from the totals section (TOTAL SAVINGS, ORDER DISCOUNT), not item-specific ones.
-- grandTotal: pick the strongest available label, in priority order: BALANCE DUE, GRAND TOTAL, TOTAL, AMOUNT DUE, TOTAL DUE. Ignore payment-processor totals if a clearer receipt total exists.
+Confidence:
+- confidence is OCR/layout clarity, not whether the receipt math reconciles.
+- Use "high" only when item rows and totals are clearly readable.
+- Use "medium" when most items are readable but some wrapping/attachment is uncertain.
+- Use "low" when blurry, cropped, or structurally ambiguous.
 
-CONFIDENCE
-Base receipt-level confidence on OCR clarity only, not math: "high" for clean unambiguous text, "medium" for some merged or unclear lines, "low" for blurry or structurally unclear receipts.
-
-Return JSON only. Never invent data that isn't visible on the receipt. Use null instead of guessing.`;
+Return JSON only. Use null instead of guessing. Include sourceText/modifiers when they help preserve the evidence behind a merged or computed item.`;
 
 const QUICK_TOTAL_PROMPT = `You extract only receipt summary totals with extremely high financial accuracy.
 
@@ -1153,6 +1183,45 @@ Rules:
 4. If multiple totals are visible, choose the amount closest to the final payable/charged amount and put the printed label in totalLabel.
 5. Use null for uncertain fields, and lower confidence when the image is blurry or totals conflict.
 6. Return JSON only.`;
+
+function buildReceiptPromptWithLocalHints(localHints, appleOcrText, localParseResult) {
+  const hintLines = [];
+  if (localHints && typeof localHints === "object") {
+    if (localHints.merchantCandidate) hintLines.push(`merchantCandidate: ${safeString(localHints.merchantCandidate).slice(0, 120)}`);
+    if (localHints.grandTotalCandidate != null) hintLines.push(`grandTotalCandidate: ${localHints.grandTotalCandidate}`);
+    if (localHints.grandTotalConfidence) hintLines.push(`grandTotalConfidence: ${safeString(localHints.grandTotalConfidence).slice(0, 60)}`);
+    if (localHints.subtotalCandidate != null) hintLines.push(`subtotalCandidate: ${localHints.subtotalCandidate}`);
+    if (localHints.taxCandidate != null) hintLines.push(`taxCandidate: ${localHints.taxCandidate}`);
+    if (localHints.tipCandidate != null) hintLines.push(`tipCandidate: ${localHints.tipCandidate}`);
+    if (localHints.targetMerchandiseSubtotal != null) hintLines.push(`targetMerchandiseSubtotal: ${localHints.targetMerchandiseSubtotal}`);
+    if (localHints.fallbackReason) hintLines.push(`localFallbackReason: ${safeString(localHints.fallbackReason).slice(0, 240)}`);
+  }
+
+  const localRows = [];
+  if (localParseResult && typeof localParseResult === "object") {
+    if (localParseResult.merchant) localRows.push(`merchant: ${safeString(localParseResult.merchant).slice(0, 120)}`);
+    if (localParseResult.subtotal != null) localRows.push(`subtotal: ${localParseResult.subtotal}`);
+    if (localParseResult.tax != null) localRows.push(`tax: ${localParseResult.tax}`);
+    if (localParseResult.tip != null) localRows.push(`tip: ${localParseResult.tip}`);
+    if (localParseResult.grandTotal != null) localRows.push(`grandTotal: ${localParseResult.grandTotal}`);
+    const items = Array.isArray(localParseResult.items) ? localParseResult.items.slice(0, 40) : [];
+    for (const item of items) {
+      if (!item || item.amount == null) continue;
+      localRows.push(`item: ${safeString(item.name || "Item").slice(0, 100)} | amount: ${item.amount} | confidence: ${safeString(item.confidence || "unknown").slice(0, 24)}`);
+    }
+  }
+
+  const trimmedOcr = safeString(appleOcrText || "").trim();
+  if (!hintLines.length && !localRows.length && !trimmedOcr) return EXTRACTION_PROMPT;
+
+  return `${EXTRACTION_PROMPT}
+
+Local OCR evidence from the device is provided below. Treat it only as supporting evidence for anchoring merchant, totals, item row candidates, and text order. Do not copy local itemization blindly, and do not override what is visibly supported by the receipt image.
+
+${hintLines.length ? `Local summary hints:\n${hintLines.map(line => `- ${line}`).join("\n")}` : ""}
+${localRows.length ? `\nLocal parsed candidates:\n${localRows.map(line => `- ${line}`).join("\n")}` : ""}
+${trimmedOcr ? `\nDevice OCR text:\n${trimmedOcr.slice(0, 6000)}` : ""}`;
+}
 
 const ITEM_NAME_NORMALIZATION_PROMPT = `
 You conservatively clean OCR-extracted receipt item names.
@@ -1409,6 +1478,326 @@ function hasRefundIndicators(text) {
 }
 
 // ============================================================
+// MISTRAL OCR MARKDOWN FALLBACK ITEMIZER
+// ============================================================
+
+function cleanOcrLine(line) {
+  return String(line || "")
+    .replace(/!\[[^\]]*]\([^)]*\)/g, " ")
+    .replace(/^#+\s*/, "")
+    .replace(/^\s*[-*•]\s*/, "")
+    .replace(/\|/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function amountMatchesInText(text) {
+  const matches = [];
+  const regex = /(?:^|[\s(])(-?\$?\s*\d{1,4}(?:,\d{3})*(?:[.,]\d{2})|\(\s*\$?\s*\d{1,4}(?:,\d{3})*(?:[.,]\d{2})\s*\))(?!\d)/g;
+  for (const match of String(text || "").matchAll(regex)) {
+    const raw = (match[1] || match[0]).trim();
+    const normalized = raw
+      .replace(/[()$,\s]/g, "")
+      .replace(/(\d),(\d{2})$/, "$1.$2");
+    const value = Number(normalized);
+    if (!Number.isFinite(value)) continue;
+    const signed = /^\(|-\s*\$?/.test(raw) ? -Math.abs(value) : value;
+    matches.push({
+      raw,
+      value: round2(signed),
+      index: match.index + match[0].indexOf(raw),
+    });
+  }
+  return matches;
+}
+
+function lastAmountNearLineEnd(line) {
+  const amounts = amountMatchesInText(line);
+  if (!amounts.length) return null;
+  const last = amounts[amounts.length - 1];
+  const tail = line.slice(last.index + last.raw.length).trim();
+  if (tail && !/^(?:[A-Z]{1,3}|[NFTX*]+)$/i.test(tail)) return null;
+  return last;
+}
+
+function amountMagnitude(value) {
+  return round2(Math.abs(Number(value || 0)));
+}
+
+function removeAmountText(line, amount) {
+  if (!amount) return cleanOcrLine(line);
+  const escaped = amount.raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return cleanOcrLine(String(line || "").replace(new RegExp(escaped, "g"), " "));
+}
+
+function isLikelyReceiptItemName(text) {
+  const cleaned = cleanOcrLine(text);
+  if (cleaned.length < 2) return false;
+  if (!/[A-Za-z]/.test(cleaned)) return false;
+  if (/^\d+[.)]?$/.test(cleaned)) return false;
+  return true;
+}
+
+function isReceiptMetadataLine(line) {
+  const lower = cleanOcrLine(line).toLowerCase();
+  if (!lower) return true;
+  if (/^[-=_]{2,}$/.test(lower)) return true;
+  if (/^(qty|quantity|item|description|price|amount|total)\b(?:\s+\w+)*$/.test(lower)) return true;
+  if (/\b(?:tel|phone|address|street|avenue|road|blvd|suite|www\.|http|email)\b/.test(lower)) return true;
+  if (/\b(?:cashier|server|table|guest|check|order|invoice|transaction|terminal|register|store)\s*(?:#|no|number|id)?\b/.test(lower)) return true;
+  if (/\b(?:auth|approval|aid|tvr|tsi|ref|trace|batch)\b/.test(lower)) return true;
+  if (/\b(?:visa|mastercard|amex|discover|debit|credit card|card\b|contactless|chip read|swiped)\b/.test(lower)) return true;
+  if (/\b(?:thank you|thanks|survey|returns?|exchange|policy|reward|points|member id)\b/.test(lower)) return true;
+  return false;
+}
+
+function summaryRoleForLine(line) {
+  const lower = cleanOcrLine(line).toLowerCase();
+  if (/\bsub\s*total\b|\bsubtotal\b/.test(lower)) return "subtotal";
+  if (/\b(?:sales\s*)?tax\b|\bhst\b|\bgst\b|\bpst\b|\bvat\b/.test(lower)) return "tax";
+  if (/\btip\b|\bgratuity\b/.test(lower)) return "tip";
+  if (/\b(?:service|delivery|bag|convenience|processing|surcharge|fee|charge)\b/.test(lower)) return "fees";
+  if (/\b(?:order|total|member|instant|promo|coupon)\s+(?:discount|savings?)\b|\byou saved\b|\btotal savings\b/.test(lower)) return "orderLevelDiscount";
+  if (/\b(?:grand\s+total|balance\s+due|amount\s+due|total\s+due|order\s+total|sale\s+total|total)\b/.test(lower)) return "grandTotal";
+  if (/\b(?:cash|tender(?:ed)?|paid|payment|change|refund)\b/.test(lower)) return "payment";
+  return null;
+}
+
+function isDiscountLine(line) {
+  const lower = cleanOcrLine(line).toLowerCase();
+  return /\b(?:discount|coupon|savings?|promo|promotion|markdown|member price|instant|void)\b/.test(lower);
+}
+
+function inferQuantityFields(line) {
+  const text = cleanOcrLine(line);
+  const weighted = text.match(/\b(\d+(?:\.\d+)?)\s*(?:lb|lbs|pound|pounds)\b.*?(?:@|x)\s*\$?\s*(\d+(?:\.\d{2})?)/i);
+  if (weighted) {
+    const weight = toNumber(weighted[1]);
+    return { qty: weight, weightLbs: weight, unitPrice: toNumber(weighted[2]) };
+  }
+  const each = text.match(/\b(\d+(?:\.\d+)?)\s*(?:@|x)\s*\$?\s*(\d+(?:\.\d{2})?)\b/i);
+  if (each) {
+    return { qty: toNumber(each[1]), weightLbs: null, unitPrice: toNumber(each[2]) };
+  }
+  const leadingQty = text.match(/^\s*(\d+(?:\.\d+)?)\s+(?=[A-Za-z])/);
+  if (leadingQty) {
+    const qty = toNumber(leadingQty[1]);
+    return qty && qty > 1 ? { qty, weightLbs: null, unitPrice: null } : { qty: null, weightLbs: null, unitPrice: null };
+  }
+  return { qty: null, weightLbs: null, unitPrice: null };
+}
+
+function inferItemCode(line, name) {
+  const text = `${line || ""} ${name || ""}`;
+  const match = text.match(/\b\d{5,14}\b/);
+  return match?.[0] || null;
+}
+
+function normalizeFallbackItemName(line, amount, pendingName = "") {
+  let name = removeAmountText(line, amount)
+    .replace(/^\s*\d+(?:\.\d+)?\s+(?=[A-Za-z])/, "")
+    .replace(/\b(?:NF|TX|TAXABLE|T|F)\b$/i, "")
+    .replace(/\b\d+(?:\.\d+)?\s*(?:lb|lbs|pound|pounds)\b.*?(?:@|x)\s*\$?\s*\d+(?:\.\d{2})?/ig, " ")
+    .replace(/\b\d+(?:\.\d+)?\s*(?:@|x)\s*\$?\s*\d+(?:\.\d{2})?\b/ig, " ")
+    .replace(/\/\s*(?:lb|lbs|pound|pounds)\b/ig, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (pendingName && (!isLikelyReceiptItemName(name) || name.length < 4)) {
+    name = `${pendingName} ${name}`.trim();
+  }
+  return normalizeItemName(name);
+}
+
+function updateSummaryFromLine(summary, line, amount) {
+  const role = summaryRoleForLine(line);
+  if (!role || !amount) return;
+  const value = amountMagnitude(amount.value);
+  if (role === "subtotal") summary.subtotal = value;
+  if (role === "tax") summary.tax = round2((summary.tax || 0) + value);
+  if (role === "tip") summary.tip = value;
+  if (role === "fees") summary.fees = round2((summary.fees || 0) + value);
+  if (role === "orderLevelDiscount") summary.orderLevelDiscount = round2((summary.orderLevelDiscount || 0) + value);
+  if (role === "grandTotal") {
+    const lower = cleanOcrLine(line).toLowerCase();
+    const priority = lower.includes("balance due") || lower.includes("amount due") ? 4
+      : lower.includes("grand total") || lower.includes("total due") || lower.includes("order total") ? 3
+      : /\btotal\b/.test(lower) ? 2
+      : 1;
+    if (priority >= (summary.grandTotalPriority || 0)) {
+      summary.grandTotal = value;
+      summary.grandTotalPriority = priority;
+    }
+  }
+}
+
+function likelyMerchantFromOcrLines(lines) {
+  for (const line of lines.slice(0, 10)) {
+    const cleaned = cleanOcrLine(line);
+    if (!cleaned) continue;
+    if (isReceiptMetadataLine(cleaned)) continue;
+    if (amountMatchesInText(cleaned).length) continue;
+    if (cleaned.length < 3 || cleaned.length > 80) continue;
+    return normalizeMerchant(cleaned);
+  }
+  return "";
+}
+
+function buildReceiptFromMistralOcrText(ocrText, reqId = "ocr_text_fallback") {
+  const lines = String(ocrText || "")
+    .split(/\r?\n/)
+    .map(cleanOcrLine)
+    .filter(Boolean)
+    .filter(line => !/^:?-{3,}:?$/.test(line));
+
+  if (!lines.length) return null;
+  const merchant = likelyMerchantFromOcrLines(lines);
+
+  const items = [];
+  const summary = {
+    subtotal: null,
+    tax: null,
+    tip: null,
+    fees: null,
+    orderLevelDiscount: null,
+    grandTotal: null,
+    grandTotalPriority: 0,
+  };
+  let pendingName = "";
+
+  for (const line of lines) {
+    if (merchant && normalizeMerchant(line) === merchant) {
+      pendingName = "";
+      continue;
+    }
+    const amount = lastAmountNearLineEnd(line);
+    if (amount) updateSummaryFromLine(summary, line, amount);
+
+    if (amount && isDiscountLine(line)) {
+      const value = amountMagnitude(amount.value);
+      const lastItem = items[items.length - 1];
+      const lowerDiscountLine = cleanOcrLine(line).toLowerCase();
+      const orderWideDiscount = /\b(?:total|order|basket|cart|you saved)\b/.test(lowerDiscountLine);
+      if (lastItem && !orderWideDiscount && value > 0 && value <= Math.max(lastItem.printedAmount, 1) * 1.25) {
+        lastItem.discountAmount = round2((lastItem.discountAmount || 0) + value);
+        lastItem.discountLabel = [lastItem.discountLabel, removeAmountText(line, amount)].filter(Boolean).join(" + ") || "Discount";
+        lastItem.sourceText = [lastItem.sourceText, line].filter(Boolean).join("\n");
+      } else {
+        summary.orderLevelDiscount = round2((summary.orderLevelDiscount || 0) + value);
+      }
+      pendingName = "";
+      continue;
+    }
+
+    const role = summaryRoleForLine(line);
+    if (role && role !== "payment") {
+      pendingName = "";
+      continue;
+    }
+    if (role === "payment" || isReceiptMetadataLine(line)) {
+      pendingName = "";
+      continue;
+    }
+
+    if (!amount) {
+      if (!isDiscountLine(line) && isLikelyReceiptItemName(line)) {
+        pendingName = pendingName ? `${pendingName} ${line}` : line;
+      }
+      continue;
+    }
+
+    const price = amountMagnitude(amount.value);
+    if (price <= 0) {
+      pendingName = "";
+      continue;
+    }
+
+    const name = normalizeFallbackItemName(line, amount, pendingName);
+    if (!isLikelyReceiptItemName(name)) {
+      pendingName = "";
+      continue;
+    }
+    const quantity = inferQuantityFields(line);
+    const sourceText = pendingName ? `${pendingName}\n${line}` : line;
+    items.push({
+      name,
+      printedAmount: price,
+      discountAmount: null,
+      discountLabel: null,
+      itemCode: inferItemCode(line, name),
+      qty: quantity.qty,
+      unitPrice: quantity.unitPrice,
+      weightLbs: quantity.weightLbs,
+      sourceText,
+      modifiers: null,
+    });
+    pendingName = "";
+  }
+
+  const uniqueItems = [];
+  const seenConsecutive = new Set();
+  for (const item of items) {
+    const key = `${item.name.toLowerCase()}|${item.printedAmount}|${item.sourceText}`;
+    if (seenConsecutive.has(key)) continue;
+    seenConsecutive.add(key);
+    uniqueItems.push(item);
+  }
+
+  if (!uniqueItems.length && summary.grandTotal == null && summary.subtotal == null) return null;
+  const amountLineCount = lines.filter(line => lastAmountNearLineEnd(line)).length;
+  const confidence = amountLineCount >= Math.max(3, uniqueItems.length) && uniqueItems.length >= 2 ? "medium" : "low";
+  const receipt = {
+    merchant,
+    receiptDate: null,
+    currency: "USD",
+    items: uniqueItems,
+    subtotal: summary.subtotal,
+    tax: summary.tax,
+    tip: summary.tip,
+    fees: summary.fees,
+    orderLevelDiscount: summary.orderLevelDiscount,
+    grandTotal: summary.grandTotal,
+    confidence,
+    notes: `Structured annotation fallback: itemized from Mistral OCR markdown (${uniqueItems.length} item rows).`,
+  };
+  if (reqId) {
+    console.log(`[${reqId}] Mistral OCR text fallback built ${uniqueItems.length} item(s), total=${receipt.grandTotal ?? "null"}`);
+  }
+  return receipt;
+}
+
+function shouldPreferOcrTextFallback(parsed, fallback) {
+  if (!fallback) return false;
+  if (!parsed) return true;
+  const parsedItemCount = Array.isArray(parsed.items) ? parsed.items.length : 0;
+  const fallbackItemCount = Array.isArray(fallback.items) ? fallback.items.length : 0;
+  if (fallbackItemCount === 0) return false;
+  if (parsedItemCount === 0) return true;
+  if (parsedItemCount <= 1 && fallbackItemCount >= 2) return true;
+  if (parsed.grandTotal == null && fallback.grandTotal != null) return true;
+  if (fallbackItemCount >= parsedItemCount + 3) {
+    if (parsed.grandTotal == null || fallback.grandTotal == null) return true;
+    if (Math.abs(parsed.grandTotal - fallback.grandTotal) <= 0.03) return true;
+  }
+  return false;
+}
+
+function selectMistralReceiptCandidate(parsed, ocrText, reqId) {
+  const fallback = buildReceiptFromMistralOcrText(ocrText, reqId);
+  if (shouldPreferOcrTextFallback(parsed, fallback)) {
+    return {
+      parsed: fallback,
+      extractionSource: parsed ? "mistral_ocr_text_fallback_preferred" : "mistral_ocr_text_fallback",
+      fallback,
+    };
+  }
+  return {
+    parsed,
+    extractionSource: parsed ? "mistral_structured_annotation" : "none",
+    fallback,
+  };
+}
+
+// ============================================================
 // STAGE 2: PRIMARY OCR / STRUCTURED PARSE
 // ============================================================
 
@@ -1455,13 +1844,13 @@ async function runMistralOcr({
   };
 }
 
-async function callMistralOCR(imageBuffer, mimeType, reqId) {
+async function callMistralOCR(imageBuffer, mimeType, reqId, options = {}) {
   const ocr = await runMistralOcr({
     buffer: imageBuffer,
     mimeType,
     reqId,
     documentAnnotationFormat: responseFormatFromZodObject(MistralReceiptSchema),
-    documentAnnotationPrompt: EXTRACTION_PROMPT,
+    documentAnnotationPrompt: buildReceiptPromptWithLocalHints(options.localHints, options.appleOcrText, options.localParseResult),
   });
 
   let parsed = null;
@@ -1509,7 +1898,7 @@ async function callMistralQuickTotal(imageBuffer, mimeType, reqId) {
   };
 }
 
-async function parseFullReceiptResponse(buffer, mimeType, reqId) {
+async function parseFullReceiptResponse(buffer, mimeType, reqId, options = {}) {
   const startedAt = Date.now();
   const timings = {
     decode_ms: 0,
@@ -1522,7 +1911,9 @@ async function parseFullReceiptResponse(buffer, mimeType, reqId) {
   };
 
   const ocrStart = Date.now();
-  const { parsed, ocrText, result } = await callMistralOCR(buffer, mimeType, reqId);
+  let { parsed, ocrText, result } = await callMistralOCR(buffer, mimeType, reqId, options);
+  const candidateSelection = selectMistralReceiptCandidate(parsed, ocrText, reqId);
+  parsed = candidateSelection.parsed;
   timings.ocr_ms = Date.now() - ocrStart;
 
   let normalized = null;
@@ -1538,6 +1929,14 @@ async function parseFullReceiptResponse(buffer, mimeType, reqId) {
   if (parsed) {
     const deterministicCleanupStart = Date.now();
     normalized = normalizeParsedReceipt(parsed);
+    normalized.notes = [
+      normalized.notes,
+      candidateSelection.extractionSource === "mistral_ocr_text_fallback_preferred"
+        ? "Structured annotation was under-itemized; used Mistral OCR markdown fallback itemization."
+        : candidateSelection.extractionSource === "mistral_ocr_text_fallback"
+          ? "Structured annotation unavailable; used Mistral OCR markdown fallback itemization."
+          : null,
+    ].filter(Boolean).join(" ") || normalized.notes;
     timings.deterministic_cleanup_ms = Date.now() - deterministicCleanupStart;
     resolutionResult.receipt = normalized;
     normalized = applyFastLocalNormalization(normalized);
@@ -1819,19 +2218,28 @@ function applyDiscountMode(items, mode) {
   });
 }
 
-function buildDiscountModeCandidate(normalized, mode, changes = []) {
+function buildDiscountModeCandidate(normalized, itemMode, orderDiscountMode = "order_discount_applied", changes = []) {
+  const visibleOrderDiscount = normalized.orderLevelDiscount ?? 0;
+  const orderDiscountAlreadyReflected = visibleOrderDiscount > 0 && orderDiscountMode === "order_discount_already_reflected";
   const receipt = {
     ...normalized,
-    items: applyDiscountMode(normalized.items || [], mode),
+    items: applyDiscountMode(normalized.items || [], itemMode),
+    orderLevelDiscount: orderDiscountAlreadyReflected ? 0 : normalized.orderLevelDiscount,
   };
   const reconciliation = reconcileReceipt(receipt);
   const subtotalPenalty = reconciliation.subtotalGap ?? 0;
   const totalPenalty = reconciliation.totalGap ?? (normalized.grandTotal == null ? 0 : 999);
   const noGrandTotalPenalty = normalized.grandTotal == null ? 0.05 : 0;
   const score = round2(totalPenalty + subtotalPenalty * 0.5 + noGrandTotalPenalty - (reconciliation.mathCheckPassed ? 0.01 : 0));
+  const label = visibleOrderDiscount > 0
+    ? `${itemMode}__${orderDiscountMode}`
+    : itemMode;
 
   return {
-    label: mode,
+    label,
+    itemMode,
+    orderDiscountMode,
+    visibleOrderDiscount,
     receipt,
     changes,
     reconciliation,
@@ -1854,10 +2262,14 @@ function resolveFinancialContradictions(normalized, reqId) {
     ...duplicateMerge.changes,
   ];
 
-  const candidates = [
-    buildDiscountModeCandidate(base, "printed_after_discount", commonChanges),
-    buildDiscountModeCandidate(base, "printed_before_discount", commonChanges),
-  ];
+  const orderDiscountModes = (base.orderLevelDiscount ?? 0) > 0
+    ? ["order_discount_applied", "order_discount_already_reflected"]
+    : ["order_discount_applied"];
+  const candidates = ["printed_after_discount", "printed_before_discount"].flatMap(itemMode =>
+    orderDiscountModes.map(orderMode =>
+      buildDiscountModeCandidate(base, itemMode, orderMode, commonChanges)
+    )
+  );
 
   candidates.sort((a, b) => {
     if (a.reconciliation.mathCheckPassed !== b.reconciliation.mathCheckPassed) {
@@ -1865,23 +2277,33 @@ function resolveFinancialContradictions(normalized, reqId) {
     }
     if (a.score !== b.score) return a.score - b.score;
     if (normalized.grandTotal == null && looksLikePreDiscountMerchant(normalized.merchant)) {
-      if (a.label === "printed_before_discount") return -1;
-      if (b.label === "printed_before_discount") return 1;
+      if (a.itemMode === "printed_before_discount") return -1;
+      if (b.itemMode === "printed_before_discount") return 1;
     }
-    if (a.label === "printed_after_discount") return -1;
-    if (b.label === "printed_after_discount") return 1;
+    if (a.orderDiscountMode !== b.orderDiscountMode) {
+      if (a.orderDiscountMode === "order_discount_applied") return -1;
+      if (b.orderDiscountMode === "order_discount_applied") return 1;
+    }
+    if (a.itemMode === "printed_after_discount") return -1;
+    if (b.itemMode === "printed_after_discount") return 1;
     return 0;
   });
 
   const best = candidates[0];
-  const modeChange = best.label === "printed_before_discount"
+  const itemModeChange = best.itemMode === "printed_before_discount"
     ? "Resolved item discounts as printed-before-discount; final item amounts subtract attached discounts."
     : "Resolved item discounts as already reflected in printed item amounts.";
-  const changes = [...best.changes, modeChange];
+  const orderModeChange = best.visibleOrderDiscount > 0
+    ? best.orderDiscountMode === "order_discount_already_reflected"
+      ? `Resolved visible order-level discount $${best.visibleOrderDiscount.toFixed(2)} as already reflected in item/subtotal amounts.`
+      : `Resolved visible order-level discount $${best.visibleOrderDiscount.toFixed(2)} as applied below subtotal.`
+    : null;
+  const changes = [...best.changes, itemModeChange, orderModeChange].filter(Boolean);
   const receipt = {
     ...best.receipt,
     notes: [
       best.receipt.notes,
+      orderModeChange,
       best.reconciliation.mathCheckPassed ? null : "Receipt math did not fully reconcile after deterministic discount-mode resolution.",
     ].filter(Boolean).join(" ") || null,
   };
@@ -1920,6 +2342,10 @@ function withTimeout(promise, timeoutMs, label) {
   });
 
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
+}
+
+function delayMs(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function fallbackNameNormalization(receipt) {
@@ -2282,7 +2708,15 @@ app.post("/parse-receipt-staged", requireAppAuth, async (req, res) => {
   const analyticsContext = analyticsContextFromRequest(req, reqId);
 
   try {
-    const { imageBase64, mimeType = "image/jpeg", sourceType = "unknown", mode = "staged" } = req.body || {};
+    const {
+      imageBase64,
+      mimeType = "image/jpeg",
+      sourceType = "unknown",
+      mode = "staged",
+      appleOcrText = "",
+      localHints = null,
+      localParseResult = null,
+    } = req.body || {};
     if (!imageBase64) {
       return res.status(400).json({ ok: false, request_id: reqId, error: { code: "MISSING_IMAGE", message: "Missing imageBase64 in request body" } });
     }
@@ -2354,7 +2788,11 @@ app.post("/parse-receipt-staged", requireAppAuth, async (req, res) => {
     });
 
     const itemizationStartedAt = Date.now();
-    parseFullReceiptResponse(buffer, safeMimeType, `${reqId}_items`)
+    const itemizationPromise = parseFullReceiptResponse(buffer, safeMimeType, `${reqId}_items`, {
+      appleOcrText,
+      localHints,
+      localParseResult,
+    })
       .then(result => {
         job.result = result;
         job.quickTotal = job.quickTotal || getQuickTotalFromFullReceipt(result);
@@ -2394,47 +2832,54 @@ app.post("/parse-receipt-staged", requireAppAuth, async (req, res) => {
         });
       });
 
-    const quickStartedAt = Date.now();
-    try {
-      const quick = await callMistralQuickTotal(buffer, safeMimeType, `${reqId}_total`);
-      job.quickTotal = quick.quickTotal;
-      job.timings.quick_total_ms = Date.now() - quickStartedAt;
-      trackAnalyticsEvent({
-        ...analyticsContext,
-        event_name: "receipt_quick_total_completed",
-        properties: {
-          request_id: reqId,
-          processing_time_ms: job.timings.quick_total_ms,
-          grand_total_found: job.quickTotal?.grandTotal != null,
-          confidence: job.quickTotal?.confidence,
-        },
-      });
-    } catch (error) {
-      job.timings.quick_total_ms = Date.now() - quickStartedAt;
-      job.quickTotalError = {
-        code: error?.code || "QUICK_TOTAL_FAILED",
-        message: safeString(error?.message || "Quick total extraction failed."),
-      };
-      trackAnalyticsEvent({
-        ...analyticsContext,
-        event_name: "receipt_quick_total_failed",
-        properties: {
-          request_id: reqId,
-          error_code: job.quickTotalError.code,
-          processing_time_ms: job.timings.quick_total_ms,
-        },
-      });
+    const firstResponseWaiters = [
+      itemizationPromise.catch(() => undefined),
+      delayMs(STAGED_FIRST_RESPONSE_TIMEOUT_MS),
+    ];
+
+    if (ENABLE_STAGED_QUICK_TOTAL) {
+      const quickStartedAt = Date.now();
+      const quickPromise = callMistralQuickTotal(buffer, safeMimeType, `${reqId}_total`)
+        .then(quick => {
+          job.quickTotal = quick.quickTotal;
+          job.timings.quick_total_ms = Date.now() - quickStartedAt;
+          trackAnalyticsEvent({
+            ...analyticsContext,
+            event_name: "receipt_quick_total_completed",
+            properties: {
+              request_id: reqId,
+              processing_time_ms: job.timings.quick_total_ms,
+              grand_total_found: job.quickTotal?.grandTotal != null,
+              confidence: job.quickTotal?.confidence,
+            },
+          });
+        })
+        .catch(error => {
+          job.timings.quick_total_ms = Date.now() - quickStartedAt;
+          job.quickTotalError = {
+            code: error?.code || "QUICK_TOTAL_FAILED",
+            message: safeString(error?.message || "Quick total extraction failed."),
+          };
+          trackAnalyticsEvent({
+            ...analyticsContext,
+            event_name: "receipt_quick_total_failed",
+            properties: {
+              request_id: reqId,
+              error_code: job.quickTotalError.code,
+              processing_time_ms: job.timings.quick_total_ms,
+            },
+          });
+        });
+      firstResponseWaiters.push(quickPromise.catch(() => undefined));
     }
+
+    await Promise.race(firstResponseWaiters);
 
     const payload = serializeStagedReceiptJob(job, reqId);
     payload.timings.total_ms = Date.now() - startedAt;
-    if (job.quickTotal) return res.status(job.status === "complete" ? 200 : 202).json(payload);
-    return res.status(202).json({
-      ...payload,
-      ok: true,
-      warning: "Quick total is still processing or timed out; itemization continues in the background.",
-      quickTotalError: job.quickTotalError || null,
-    });
+    if (job.status === "complete") return res.json(payload);
+    if (job.status === "failed") return res.status(500).json(payload);
+    return res.status(202).json(payload);
   } catch (error) {
     return res.status(500).json({
       ok: false,
@@ -2613,7 +3058,8 @@ app.post("/parse-receipt", requireAppAuth, async (req, res) => {
       event_name: "receipt_ocr_started",
       properties: { request_id: reqId, ocr_provider: "mistral", file_type: safeMimeType, mode },
     });
-    const { parsed, ocrText, result } = await callMistralOCR(buffer, safeMimeType, reqId);
+    let { parsed, ocrText, result } = await callMistralOCR(buffer, safeMimeType, reqId);
+    const candidateSelection = selectMistralReceiptCandidate(parsed, ocrText, reqId);
     timings.ocr_ms = Date.now() - ocrStart;
     trackAnalyticsEvent({
       ...analyticsContext,
@@ -2627,7 +3073,7 @@ app.post("/parse-receipt", requireAppAuth, async (req, res) => {
       },
     });
 
-    const receiptClassification = classifyReceiptUpload({ ocrText, parsed });
+    const receiptClassification = classifyReceiptUpload({ ocrText, parsed: parsed || candidateSelection.fallback });
     console.log(`[${reqId}] Receipt classification: ${receiptClassification.ok ? "receipt" : "reject"} confidence=${receiptClassification.confidence} reason=${receiptClassification.reason}`);
     if (!receiptClassification.ok) {
       timings.total_ms = Date.now() - startedAt;
@@ -2666,14 +3112,23 @@ app.post("/parse-receipt", requireAppAuth, async (req, res) => {
       allCandidates: [],
     };
     
+    parsed = candidateSelection.parsed;
     if (parsed) {
       trackAnalyticsEvent({
         ...analyticsContext,
         event_name: "receipt_parse_started",
-        properties: { request_id: reqId, parser: "mistral_structured_output", mode },
+        properties: { request_id: reqId, parser: candidateSelection.extractionSource, mode },
       });
       const deterministicCleanupStart = Date.now();
       normalized = normalizeParsedReceipt(parsed);
+      normalized.notes = [
+        normalized.notes,
+        candidateSelection.extractionSource === "mistral_ocr_text_fallback_preferred"
+          ? "Structured annotation was under-itemized; used Mistral OCR markdown fallback itemization."
+          : candidateSelection.extractionSource === "mistral_ocr_text_fallback"
+            ? "Structured annotation unavailable; used Mistral OCR markdown fallback itemization."
+            : null,
+      ].filter(Boolean).join(" ") || normalized.notes;
       timings.deterministic_cleanup_ms = Date.now() - deterministicCleanupStart;
 
       resolutionResult = {
@@ -3411,6 +3866,7 @@ if (process.env.NODE_ENV !== "test") {
 
 export {
   app,
+  buildReceiptFromMistralOcrText,
   extractFallbackBankTransactionsFromOcrText,
   hashIdentifier,
   normalizeAnalyticsFailureReason,
