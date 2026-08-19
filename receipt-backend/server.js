@@ -113,8 +113,8 @@ const ItemCategoryEnum = z.enum([
 
 const ReceiptItemSchema = z.object({
   name: z.string().describe("Purchased item name, merging visible continuation/modifier lines that belong to the same item"),
-  printedAmount: z.number().describe("The item's visible final line amount or line total. Use a direct quantity x unit-price calculation only when that exact formula is visibly printed on the item row."),
-  discountAmount: z.number().nullable().optional().describe("Positive magnitude of a discount/savings line clearly tied to this specific item. Null if no discount line is tied to this item."),
+  printedAmount: z.number().describe("Final charged value for this item after item-level discounts/savings/coupons. This is the amount the user should split for the item."),
+  discountAmount: z.number().nullable().optional().describe("Optional positive magnitude of a visible discount/savings line clearly tied to this item. Display metadata only; printedAmount must already be the final charged value."),
   discountLabel: z.string().nullable().optional().describe("Visible text of the discount line tied to this item (e.g. 'INSTANT SAVINGS', 'MEMBER DISCOUNT'). Null if none."),
   itemCode: z
     .string()
@@ -137,7 +137,7 @@ const MistralReceiptSchema = z.object({
   tax: z.number().nullable().optional().describe("Sales tax amount"),
   tip: z.number().nullable().optional().describe("Tip/gratuity amount"),
   fees: z.number().nullable().optional().describe("Service fees, delivery fees, bag fees, etc."),
-  orderLevelDiscount: z.number().nullable().optional().describe("Order-wide discounts (not item-specific)"),
+  orderLevelDiscount: z.number().nullable().optional().describe("Order-wide discount not already reflected in item printedAmount values"),
   grandTotal: z.number().nullable().optional().describe("Final total (BALANCE DUE, GRAND TOTAL, etc.)"),
   confidence: ConfidenceEnum.describe("OCR clarity confidence, not math confidence"),
   notes: z.string().nullable().optional().describe("Parsing notes or warnings"),
@@ -1133,24 +1133,25 @@ const EXTRACTION_PROMPT = `You are the strongest fallback receipt itemizer for a
 Read the receipt visually and structurally. Do not assume a fixed receipt type, merchant format, column order, country, or POS template. Receipts may be restaurants, bars, cafes, grocery, retail, pharmacy, delivery, tickets, service invoices, multi-page PDFs, folded photos, screenshots, or markdown tables. Infer the layout from the visible document itself.
 
 Goal:
-- Return every purchased line that a group may need to split.
+- Return the merchant, final total, and every purchased line that a group may need to split.
 - Preserve financial truth: never hallucinate an item or amount.
-- Prefer a complete supported itemization over a total-only parse when item rows are visible.
+- Keep the main item amount simple: item printedAmount is the final charged value for that item.
 
 Itemization rules:
 1. One purchased product/service/menu line = one item.
 2. Merge visible continuation lines, add-ons, modifiers, options, size/color lines, and wrapped descriptions into the parent item when they are spatially or semantically attached.
-3. Use printedAmount for the visible line total. If the row visibly shows quantity/weight x unit price but no separate extended total, you may compute printedAmount only from that directly visible formula and mention that in sourceText.
+3. Use printedAmount for the final charged/split value of that item after item-level discounts, savings, coupons, or instant rebates.
 4. Do not require the amount to be on the exact same OCR text line when layout clearly ties a following/adjacent amount to the item.
 5. Keep duplicate purchases as separate items unless the receipt visibly shows one row with quantity > 1.
-6. For quantity/weight rows, fill qty, unitPrice, and weightLbs when visible. Keep printedAmount as the extended line amount.
+6. For quantity/weight rows, fill qty, unitPrice, and weightLbs when visible. Keep printedAmount as the final extended line amount after item-level discounts.
 7. Preserve item codes/SKUs when visible next to the item, but never use a code alone as the item name if descriptive text is visible.
 
 Discounts:
-- If a discount/coupon/savings line is clearly attached to one item by adjacency, indentation, SKU/reference, or row grouping, put its positive magnitude in discountAmount and visible label in discountLabel.
-- If a discount is order-wide or only appears in the totals section, put it in orderLevelDiscount.
+- If a discount/coupon/savings line is clearly attached to one item by adjacency, indentation, SKU/reference, or row grouping, subtract it from that item and return the net charged item value in printedAmount.
+- Put the positive discount magnitude in discountAmount and visible label in discountLabel only as display/evidence metadata.
+- If the item row already shows the post-discount amount, use that post-discount amount directly as printedAmount.
+- If a discount is order-wide or only appears in the totals section, put it in orderLevelDiscount only when it is not already reflected in item printedAmount values.
 - Do not output standalone savings lines as purchased items.
-- Do not subtract item discounts yourself unless the visible item row already shows the post-discount line total.
 
 Never output these as purchased items:
 - Subtotal, total, balance due, amount due, tendered, change, cash back.
@@ -2007,12 +2008,6 @@ function normalizeParsedReceipt(parsed) {
 // STAGE 3B: NON-ITEM ROW GUARD + DISCOUNT MODE RESOLUTION
 // ============================================================
 
-const PRE_DISCOUNT_PRINTED_MERCHANTS = [/\bCOSTCO\b/i, /\bBJ'?S\b/i, /\bSAM'?S\s*CLUB\b/i];
-
-function looksLikePreDiscountMerchant(merchant) {
-  return PRE_DISCOUNT_PRINTED_MERCHANTS.some(pattern => pattern.test(merchant || ""));
-}
-
 function isLikelyNonItemRow(name) {
   const lower = String(name || "").toLowerCase().trim();
   if (lower.length < 2) return true;
@@ -2291,10 +2286,6 @@ function resolveFinancialContradictions(normalized, reqId) {
       return a.reconciliation.mathCheckPassed ? -1 : 1;
     }
     if (a.score !== b.score) return a.score - b.score;
-    if (normalized.grandTotal == null && looksLikePreDiscountMerchant(normalized.merchant)) {
-      if (a.itemMode === "printed_before_discount") return -1;
-      if (b.itemMode === "printed_before_discount") return 1;
-    }
     if (a.orderDiscountMode !== b.orderDiscountMode) {
       if (a.orderDiscountMode === "order_discount_applied") return -1;
       if (b.orderDiscountMode === "order_discount_applied") return 1;
