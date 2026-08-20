@@ -1120,7 +1120,7 @@ function reconcileBankDocument(bankDocument) {
 
 const EXTRACTION_PROMPT = `Read this receipt like a simple bill-splitting scanner.
 
-Return only the merchant name, final total, and purchased item rows.
+Return the merchant name, final total, purchased item rows, and simple receipt-level summary adjustments.
 
 For each item:
 - name: the visible item name.
@@ -1132,7 +1132,10 @@ Important:
 3. discountAmount and discountLabel are optional display metadata only. They must never change printedAmount.
 4. Keep duplicate purchases as separate items when they are actually separate purchased rows.
 5. Do not invent missing rows or prices. If a row is unclear, omit it instead of guessing.
-6. grandTotal is the final payable/charged total, not subtotal, savings, cash tendered, change, or authorization metadata.
+6. Put visible sales tax in tax, visible tip/gratuity in tip, and visible service/delivery/bag/card fees in fees.
+7. Put receipt-level/order-wide discounts or coupons in orderLevelDiscount only when they are separate summary discounts, not already reflected in item amounts.
+8. grandTotal is the final payable/charged total, not subtotal, net sales, net total, savings, cash tendered, change, or authorization metadata.
+9. If the receipt has NET SALES plus TAX, grandTotal should be NET SALES + TAX plus any visible tip/fees minus visible order discount.
 
 Return JSON only. Use null for uncertain totals.`;
 
@@ -1144,7 +1147,7 @@ Rules:
 1. Never invent values not visible on the receipt.
 2. Pick the final amount owed/charged using this priority:
    BALANCE DUE, GRAND TOTAL, TOTAL, AMOUNT DUE, TOTAL DUE.
-3. Do not confuse SUBTOTAL, TAX, SAVINGS, CHANGE, CASH TENDERED, CARD AUTH, or payment processor metadata with grandTotal.
+3. Do not confuse SUBTOTAL, NET SALES, NET TOTAL, TAX, SAVINGS, CHANGE, CASH TENDERED, CARD AUTH, or payment processor metadata with grandTotal.
 4. If multiple totals are visible, choose the amount closest to the final payable/charged amount and put the printed label in totalLabel.
 5. Use null for uncertain fields, and lower confidence when the image is blurry or totals conflict.
 6. Return JSON only.`;
@@ -1967,7 +1970,7 @@ function isLikelyNonItemRow(name) {
   const word = kw => new RegExp(`\\b${kw}\\b`, "i").test(lower);
 
   if (["visa", "mastercard", "amex", "discover", "auth code", "approval", "aid:", "tvr:", "rrn:"].some(kw => lower.includes(kw))) return true;
-  if (!lower.includes("items") && ["subtotal", "balance due", "amount due", "grand total", "order total", "transaction total"].some(kw => lower.includes(kw))) return true;
+  if (!lower.includes("items") && ["subtotal", "net sales", "net sale", "net total", "balance due", "amount due", "grand total", "order total", "transaction total"].some(kw => lower.includes(kw))) return true;
   if (word("total") && !lower.includes("items")) return true;
   if (["tax", "tip", "gratuity", "hst", "gst", "pst", "vat"].some(kw => word(kw))) return true;
   if (["discount", "savings", "saved", "coupon", "promo", "promotion"].some(kw => lower.includes(kw))) return true;
@@ -2521,6 +2524,7 @@ function buildApiResponse(parseResult, timings, reqId) {
     tax: parsed.tax,
     tip: parsed.tip,
     fees: parsed.fees,
+    orderLevelDiscount: parsed.orderLevelDiscount,
     grandTotal: parsed.grandTotal,
     confidence,
     status,
