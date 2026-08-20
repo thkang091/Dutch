@@ -112,26 +112,16 @@ const ItemCategoryEnum = z.enum([
 ]);
 
 const ReceiptItemSchema = z.object({
-  name: z.string().describe("Purchased item name, merging visible continuation/modifier lines that belong to the same item"),
-  printedAmount: z.number().describe("Final charged value for this item after item-level discounts/savings/coupons. This is the amount the user should split for the item."),
-  discountAmount: z.number().nullable().optional().describe("Optional positive magnitude of a visible discount/savings line clearly tied to this item. Display metadata only; printedAmount must already be the final charged value."),
-  discountLabel: z.string().nullable().optional().describe("Visible text of the discount line tied to this item (e.g. 'INSTANT SAVINGS', 'MEMBER DISCOUNT'). Null if none."),
-  itemCode: z
-    .string()
-    .nullable()
-    .optional()
-    .describe("Retailer item number or SKU printed directly next to the item, if visible"),
-  qty: z.number().nullable().optional().describe("Quantity purchased"),
-  unitPrice: z.number().nullable().optional().describe("Price per unit before any discount"),
-  weightLbs: z.number().nullable().optional().describe("Weight in pounds for weighted items"),
-  sourceText: z.string().nullable().optional().describe("Visible OCR text lines used for this item, if helpful for review"),
-  modifiers: z.array(z.string()).nullable().optional().describe("Visible modifiers/options/add-ons that are part of this purchased line"),
+  name: z.string().describe("Visible purchased item name. Keep it short and literal."),
+  printedAmount: z.number().describe("The final item value to split. If a visible item discount is already applied, this must be the after-discount value."),
+  discountAmount: z.number().nullable().optional().describe("Optional positive visible item discount magnitude. Metadata only; never subtract it again."),
+  discountLabel: z.string().nullable().optional().describe("Optional visible discount label tied to this item."),
 });
 
 const MistralReceiptSchema = z.object({
-  merchant: z.string().describe("Merchant name from top of receipt"),
+  merchant: z.string().nullable().optional().describe("Merchant name from top of receipt"),
   receiptDate: z.string().nullable().optional().describe("Receipt date YYYY-MM-DD format"),
-  currency: z.string().describe("Currency code (USD, CAD, EUR, etc.)"),
+  currency: z.string().nullable().optional().describe("Currency code (USD, CAD, EUR, etc.)"),
   items: z.array(ReceiptItemSchema).describe("Purchased items, transcribed exactly as printed"),
   subtotal: z.number().nullable().optional().describe("Subtotal if explicitly shown"),
   tax: z.number().nullable().optional().describe("Sales tax amount"),
@@ -139,7 +129,7 @@ const MistralReceiptSchema = z.object({
   fees: z.number().nullable().optional().describe("Service fees, delivery fees, bag fees, etc."),
   orderLevelDiscount: z.number().nullable().optional().describe("Order-wide discount not already reflected in item printedAmount values"),
   grandTotal: z.number().nullable().optional().describe("Final total (BALANCE DUE, GRAND TOTAL, etc.)"),
-  confidence: ConfidenceEnum.describe("OCR clarity confidence, not math confidence"),
+  confidence: ConfidenceEnum.nullable().optional().describe("OCR clarity confidence, not math confidence"),
   notes: z.string().nullable().optional().describe("Parsing notes or warnings"),
 });
 
@@ -1128,49 +1118,23 @@ function reconcileBankDocument(bankDocument) {
 // MISTRAL EXTRACTION PROMPT
 // ============================================================
 
-const EXTRACTION_PROMPT = `You are the strongest fallback receipt itemizer for a bill-splitting app.
+const EXTRACTION_PROMPT = `Read this receipt like a simple bill-splitting scanner.
 
-Read the receipt visually and structurally. Do not assume a fixed receipt type, merchant format, column order, country, or POS template. Receipts may be restaurants, bars, cafes, grocery, retail, pharmacy, delivery, tickets, service invoices, multi-page PDFs, folded photos, screenshots, or markdown tables. Infer the layout from the visible document itself.
+Return only the merchant name, final total, and purchased item rows.
 
-Goal:
-- Return the merchant, final total, and every purchased line that a group may need to split.
-- Preserve financial truth: never hallucinate an item or amount.
-- Keep the main item amount simple: item printedAmount is the final charged value for that item.
+For each item:
+- name: the visible item name.
+- printedAmount: the final value the user should split for that item.
 
-Itemization rules:
-1. One purchased product/service/menu line = one item.
-2. Merge visible continuation lines, add-ons, modifiers, options, size/color lines, and wrapped descriptions into the parent item when they are spatially or semantically attached.
-3. Use printedAmount for the final charged/split value of that item after item-level discounts, savings, coupons, or instant rebates.
-4. Do not require the amount to be on the exact same OCR text line when layout clearly ties a following/adjacent amount to the item.
-5. Keep duplicate purchases as separate items unless the receipt visibly shows one row with quantity > 1.
-6. For quantity/weight rows, fill qty, unitPrice, and weightLbs when visible. Keep printedAmount as the final extended line amount after item-level discounts.
-7. Preserve item codes/SKUs when visible next to the item, but never use a code alone as the item name if descriptive text is visible.
+Important:
+1. Do not output subtotal, tax, tip, fees, total, payment, change, card/auth, rewards, coupon, savings, or discount-only rows as items.
+2. If an item discount is clearly applied to an item, printedAmount must be the after-discount item value. If the receipt already prints the after-discount value, use that value directly.
+3. discountAmount and discountLabel are optional display metadata only. They must never change printedAmount.
+4. Keep duplicate purchases as separate items when they are actually separate purchased rows.
+5. Do not invent missing rows or prices. If a row is unclear, omit it instead of guessing.
+6. grandTotal is the final payable/charged total, not subtotal, savings, cash tendered, change, or authorization metadata.
 
-Discounts:
-- If a discount/coupon/savings line is clearly attached to one item by adjacency, indentation, SKU/reference, or row grouping, subtract it from that item and return the net charged item value in printedAmount.
-- Put the positive discount magnitude in discountAmount and visible label in discountLabel only as display/evidence metadata.
-- If the item row already shows the post-discount amount, use that post-discount amount directly as printedAmount.
-- If a discount is order-wide or only appears in the totals section, put it in orderLevelDiscount only when it is not already reflected in item printedAmount values.
-- Do not output standalone savings lines as purchased items.
-
-Never output these as purchased items:
-- Subtotal, total, balance due, amount due, tendered, change, cash back.
-- Tax, service charge, delivery fee, bag fee, tip, gratuity, surcharge. Put these in tax/tip/fees.
-- Payment/auth/card rows, gift card balance, rewards/points, order/table/server/check numbers, address/phone/date metadata.
-- Section headers without their own price.
-
-Totals:
-- Extract subtotal, tax, tip, fees, orderLevelDiscount, grandTotal only when visibly supported.
-- For grandTotal choose the final payable/charged amount, not subtotal, tax, savings, tendered cash, change, authorization amount, or remaining gift card balance.
-- If multiple final totals appear (cash/non-cash/card total), choose the one most consistent with the actual amount due/charged and explain ambiguity in notes.
-
-Confidence:
-- confidence is OCR/layout clarity, not whether the receipt math reconciles.
-- Use "high" only when item rows and totals are clearly readable.
-- Use "medium" when most items are readable but some wrapping/attachment is uncertain.
-- Use "low" when blurry, cropped, or structurally ambiguous.
-
-Return JSON only. Use null instead of guessing. Include sourceText/modifiers when they help preserve the evidence behind a merged or computed item.`;
+Return JSON only. Use null for uncertain totals.`;
 
 const QUICK_TOTAL_PROMPT = `You extract only receipt summary totals with extremely high financial accuracy.
 
@@ -1198,30 +1162,14 @@ function buildReceiptPromptWithLocalHints(localHints, appleOcrText, localParseRe
     if (localHints.fallbackReason) hintLines.push(`localFallbackReason: ${safeString(localHints.fallbackReason).slice(0, 240)}`);
   }
 
-  const localRows = [];
-  if (localParseResult && typeof localParseResult === "object") {
-    if (localParseResult.merchant) localRows.push(`merchant: ${safeString(localParseResult.merchant).slice(0, 120)}`);
-    if (localParseResult.subtotal != null) localRows.push(`subtotal: ${localParseResult.subtotal}`);
-    if (localParseResult.tax != null) localRows.push(`tax: ${localParseResult.tax}`);
-    if (localParseResult.tip != null) localRows.push(`tip: ${localParseResult.tip}`);
-    if (localParseResult.grandTotal != null) localRows.push(`grandTotal: ${localParseResult.grandTotal}`);
-    const items = Array.isArray(localParseResult.items) ? localParseResult.items.slice(0, 40) : [];
-    for (const item of items) {
-      if (!item || item.amount == null) continue;
-      localRows.push(`item: ${safeString(item.name || "Item").slice(0, 100)} | amount: ${item.amount} | confidence: ${safeString(item.confidence || "unknown").slice(0, 24)}`);
-    }
-  }
-
-  const trimmedOcr = safeString(appleOcrText || "").trim();
-  if (!hintLines.length && !localRows.length && !trimmedOcr) return EXTRACTION_PROMPT;
+  if (!hintLines.length) return EXTRACTION_PROMPT;
 
   return `${EXTRACTION_PROMPT}
 
-Local OCR evidence from the device is provided below. Treat it only as supporting evidence for anchoring merchant, totals, item row candidates, and text order. Do not copy local itemization blindly, and do not override what is visibly supported by the receipt image.
+Optional local summary hints from the device are provided below. Use them only to anchor merchant/totals when they are visibly supported by the receipt image. Do not use local OCR item rows.
 
-${hintLines.length ? `Local summary hints:\n${hintLines.map(line => `- ${line}`).join("\n")}` : ""}
-${localRows.length ? `\nLocal parsed candidates:\n${localRows.map(line => `- ${line}`).join("\n")}` : ""}
-${trimmedOcr ? `\nDevice OCR text:\n${trimmedOcr.slice(0, 6000)}` : ""}`;
+Local summary hints:
+${hintLines.map(line => `- ${line}`).join("\n")}`;
 }
 
 const ITEM_NAME_NORMALIZATION_PROMPT = `
@@ -1981,18 +1929,20 @@ function normalizeParsedReceipt(parsed) {
     merchant: normalizeMerchant(parsed.merchant),
     receiptDate: parsed.receiptDate || null,
     currency: parsed.currency || "USD",
-    items: (parsed.items || []).map(item => ({
-      name: normalizeItemName(item.name),
-      printedAmount: round2(item.printedAmount),
-      discountAmount: toNumber(item.discountAmount),
-      discountLabel: item.discountLabel ?? null,
-      sourceText: item.sourceText ?? null,
-      itemCode: item.itemCode ?? null,
-      qty: toNumber(item.qty),
-      unitPrice: toNumber(item.unitPrice),
-      weightLbs: toNumber(item.weightLbs),
-      confidence: parsed.confidence || "medium",
-    })),
+    items: (parsed.items || [])
+      .map(item => ({
+        name: normalizeItemName(item.name),
+        printedAmount: round2(item.printedAmount),
+        discountAmount: toNumber(item.discountAmount),
+        discountLabel: item.discountLabel ?? null,
+        sourceText: item.sourceText ?? null,
+        itemCode: item.itemCode ?? null,
+        qty: toNumber(item.qty),
+        unitPrice: toNumber(item.unitPrice),
+        weightLbs: toNumber(item.weightLbs),
+        confidence: parsed.confidence || "medium",
+      }))
+      .filter(item => item.printedAmount >= 0.01),
     subtotal: toNumber(parsed.subtotal),
     tax: toNumber(parsed.tax),
     tip: toNumber(parsed.tip),
@@ -2258,75 +2208,52 @@ function buildDiscountModeCandidate(normalized, itemMode, orderDiscountMode = "o
 }
 
 function resolveFinancialContradictions(normalized, reqId) {
-  console.log(`[${reqId}] Starting discount mode resolution...`);
+  console.log(`[${reqId}] Starting simple receipt cleanup...`);
 
   const stripped = stripNonItemRows(normalized.items, reqId);
-  const duplicateMerge = mergeStrayDuplicateRows(stripped.kept, reqId);
-  const base = {
+  const items = stripped.kept.map(item => {
+    const discount = item.discountAmount ?? 0;
+    return {
+      ...item,
+      amount: round2(item.printedAmount),
+      originalAmount: discount > 0 ? round2(item.printedAmount + discount) : null,
+      itemDiscount: discount > 0 ? round2(discount) : null,
+      itemDiscountLabel: discount > 0 ? item.discountLabel || null : null,
+    };
+  });
+
+  const receipt = {
     ...normalized,
-    items: duplicateMerge.items,
+    items,
   };
 
-  const commonChanges = [
+  const changes = [
     ...stripped.dropped.map(item => `Removed non-item row: "${item.name}"`),
-    ...duplicateMerge.changes,
+    "Preserved Mistral final item amounts without discount-mode rewriting.",
   ];
 
-  const orderDiscountModes = (base.orderLevelDiscount ?? 0) > 0
-    ? ["order_discount_applied", "order_discount_already_reflected"]
-    : ["order_discount_applied"];
-  const candidates = ["printed_after_discount", "printed_before_discount"].flatMap(itemMode =>
-    orderDiscountModes.map(orderMode =>
-      buildDiscountModeCandidate(base, itemMode, orderMode, commonChanges)
-    )
-  );
+  const reconciliation = reconcileReceipt(receipt);
+  if (!reconciliation.mathCheckPassed && reconciliation.mismatchReasons.length > 0) {
+    receipt.notes = [
+      receipt.notes,
+      "Receipt math did not fully reconcile after preserving Mistral final item amounts.",
+    ].filter(Boolean).join(" ");
+  }
 
-  candidates.sort((a, b) => {
-    if (a.reconciliation.mathCheckPassed !== b.reconciliation.mathCheckPassed) {
-      return a.reconciliation.mathCheckPassed ? -1 : 1;
-    }
-    if (a.score !== b.score) return a.score - b.score;
-    if (a.orderDiscountMode !== b.orderDiscountMode) {
-      if (a.orderDiscountMode === "order_discount_applied") return -1;
-      if (b.orderDiscountMode === "order_discount_applied") return 1;
-    }
-    if (a.itemMode === "printed_after_discount") return -1;
-    if (b.itemMode === "printed_after_discount") return 1;
-    return 0;
-  });
-
-  const best = candidates[0];
-  const itemModeChange = best.itemMode === "printed_before_discount"
-    ? "Resolved item discounts as printed-before-discount; final item amounts subtract attached discounts."
-    : "Resolved item discounts as already reflected in printed item amounts.";
-  const orderModeChange = best.visibleOrderDiscount > 0
-    ? best.orderDiscountMode === "order_discount_already_reflected"
-      ? `Resolved visible order-level discount $${best.visibleOrderDiscount.toFixed(2)} as already reflected in item/subtotal amounts.`
-      : `Resolved visible order-level discount $${best.visibleOrderDiscount.toFixed(2)} as applied below subtotal.`
-    : null;
-  const changes = [...best.changes, itemModeChange, orderModeChange].filter(Boolean);
-  const receipt = {
-    ...best.receipt,
-    notes: [
-      best.receipt.notes,
-      orderModeChange,
-      best.reconciliation.mathCheckPassed ? null : "Receipt math did not fully reconcile after deterministic discount-mode resolution.",
-    ].filter(Boolean).join(" ") || null,
-  };
-
-  console.log(`[${reqId}] Discount mode candidates:`);
-  candidates.forEach(candidate => {
-    console.log(`[${reqId}]   - ${candidate.label}: score=${candidate.score.toFixed(3)}, gap=$${candidate.reconciliation.totalGap?.toFixed(2) ?? "N/A"}, math=${candidate.reconciliation.mathCheckPassed ? "✓" : "✗"}`);
-  });
-  console.log(`[${reqId}] ✓ Selected discount mode: ${best.label}`);
+  console.log(`[${reqId}] Simple cleanup kept ${items.length} item(s); math=${reconciliation.mathCheckPassed ? "✓" : "✗"}`);
 
   return {
     receipt,
-    selectedCandidate: best.label,
-    candidatesTried: candidates.length,
+    selectedCandidate: "simple_final_amounts",
+    candidatesTried: 1,
     suspicious: stripped.dropped.map((item, index) => ({ index, item, flags: ["non_item_row"] })),
     changes,
-    allCandidates: candidates,
+    allCandidates: [{
+      label: "simple_final_amounts",
+      receipt,
+      reconciliation,
+      score: reconciliation.totalGap ?? 0,
+    }],
   };
 }
 
@@ -2499,8 +2426,12 @@ function determineParseStatus(reconciliation, normalized, hasRefund, resolutionR
     confidence = "low";
   }
 
-  // Adjust confidence based on contradiction resolution
-  if (resolutionResult?.selectedCandidate && resolutionResult.selectedCandidate !== "original") {
+  // Adjust confidence only for cleanup that actually rewrites financial values.
+  if (
+    resolutionResult?.selectedCandidate &&
+    !["original", "simple_final_amounts"].includes(resolutionResult.selectedCandidate) &&
+    (resolutionResult?.changes || []).length > 0
+  ) {
     // Applied a repair - slightly lower confidence
     confidence = confidence === "high" ? "medium" : confidence;
   }
@@ -2647,11 +2578,11 @@ function buildApiResponse(parseResult, timings, reqId) {
       },
       contradiction_resolution: {
         enabled: true,
-        reason: "math_scored_discount_application_and_item_repair",
+        reason: "simple_cleanup_preserve_mistral_final_item_amounts",
         suspicious_items_detected: resolutionResult?.suspicious?.length || 0,
         suspicious_items: (resolutionResult?.suspicious || []).map(s => ({
           name: s.item.name,
-          amount: s.item.amount,
+          amount: s.item.amount ?? s.item.printedAmount ?? null,
           flags: s.flags,
           suspicion_score: s.suspicionScore,
         })),
