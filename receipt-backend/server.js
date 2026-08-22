@@ -1473,6 +1473,10 @@ function hasRefundIndicators(text) {
 function cleanOcrLine(line) {
   return String(line || "")
     .replace(/!\[[^\]]*]\([^)]*\)/g, " ")
+    // Mistral emphasises the total line often enough that leaving the markers
+    // in place cost us the total outright: the amount matcher needs whitespace
+    // in front of a number, and "**26.93**" gives it an asterisk.
+    .replace(/\*\*|__/g, " ")
     .replace(/^#+\s*/, "")
     .replace(/^\s*[-*•]\s*/, "")
     .replace(/\|/g, " ")
@@ -1527,6 +1531,14 @@ function isLikelyReceiptItemName(text) {
   return true;
 }
 
+/// A printed suggested-gratuity table, which must not be read as a charged tip.
+///
+/// The percent heuristic below is deliberately narrow, because the wide version
+/// of it swallowed sales tax. "SALES TAX 10.25% 3.36" has a percent and two
+/// numbers on it, and that was enough to file the line under "payment" and drop
+/// the tax outright — a silent hole in every receipt that prints its tax rate.
+/// Two things keep that from happening now: a rate written with decimals is not
+/// a tip percent, and a line that names a tax is never a tip table.
 function isLikelySuggestedTipRowText(text) {
   const lower = cleanOcrLine(text).toLowerCase();
   if (!lower) return false;
@@ -1534,12 +1546,22 @@ function isLikelySuggestedTipRowText(text) {
   if (/\b(?:tip|gratuity)\b.*\bsuggest(?:ed|ions?)?\b/.test(lower)) return true;
   if (/\b(?:tip|gratuity)\b.*\bamount\b.*\btotal\b/.test(lower)) return true;
 
-  const hasTipTablePercent = /\b(?:[1-4]?\d|50)\s*%/.test(lower);
+  // A tax, subtotal or fee line is a summary row with a rate on it, not a
+  // gratuity option. Checked after the explicit rules above so that a genuine
+  // "suggested tip (pre-tax)" header is still recognised.
+  if (/\b(?:tax|taxes|hst|gst|pst|qst|vat|subtotal|sub total)\b/.test(lower)) return false;
+
+  // Tip tables print whole percents (15%, 18%, 20%). The lookbehind stops the
+  // fractional half of a decimal rate — the "25" of "10.25%" — from passing as
+  // one.
+  const hasTipTablePercent = /(?<![\d.])(?:[1-4]?\d|50)\s*%(?!\d)/.test(lower);
   if (!hasTipTablePercent) return false;
 
+  // A tip table row carries the tip and the resulting total side by side. A
+  // tip that was actually charged carries one amount, so requiring two is what
+  // separates "20% 11.80 76.11" from "TIP 20% 8.00".
   const amountCount = amountMatchesInText(lower).length;
-  const hasTipTableTerms = /\b(?:tip|gratuity|amount|total)\b/.test(lower);
-  return hasTipTableTerms || amountCount >= 2 || /^\s*(?:[1-4]?\d|50)\s*%/.test(lower);
+  return amountCount >= 2 || /^\s*(?:[1-4]?\d|50)\s*%/.test(lower);
 }
 
 function isReceiptMetadataLine(line) {
@@ -1556,17 +1578,86 @@ function isReceiptMetadataLine(line) {
   return false;
 }
 
+/// Which summary field a label opens, in priority order.
+///
+/// Every pattern is anchored, because a summary label is what a row *starts*
+/// with. Searching for these words anywhere in the line is what deleted
+/// "COLGATE TOTAL TP" off a CVS receipt and filed "VAT 69 WHISKY" under sales
+/// tax. Order matters twice over: the discount rows must be tested before the
+/// bare `total`, or "TOTAL SAVINGS" reads as the amount due; and the total rows
+/// must be tested before the fee rows, or "TOTAL CHARGE" reads as a service fee
+/// and the receipt ends up with no total at all.
+const SUMMARY_ROLE_PATTERNS = [
+  ["subtotal", /^sub[\s-]?total\b/],
+  ["subtotal", /^merchandise\s+(?:sub)?total\b/],
+  ["tax", /^(?:sales|state|local|city|county|food|liquor|meals?|room|use)?\s*tax(?:es)?\s*\d*\b/],
+  ["tax", /^(?:hst|gst|pst|qst|vat)\b/],
+  // Delivery apps name the tip after whoever earns it. Without the qualifier
+  // "Dasher Tip" reads as an item and gets split across the table like food.
+  ["tip", /^(?:dasher|driver|courier|shopper|server|delivery|suggested|added)?\s*(?:tip|gratuity)\b/],
+  ["orderLevelDiscount", /^(?:you\s+saved|total\s+savings?|member\s+savings?|instant\s+savings?)\b/],
+  ["orderLevelDiscount", /^(?:order|member|instant|promo(?:tion)?|coupon|total)\s+(?:discount|savings?)\b/],
+  ["orderLevelDiscount", /^(?:discount|savings?|coupon|promo(?:tion)?|markdown|rewards?|loyalty)\b/],
+  ["grandTotal", /^(?:grand|order|sale|transaction|trans|check|final|store)\s+total\b/],
+  ["grandTotal", /^(?:total|balance|amount|payment)\s+(?:due|paid|payable|charged?|tendered?|owed)\b/],
+  ["grandTotal", /^total\b/],
+  ["grandTotal", /^net\s+(?:sales?|total)\b/],
+  ["fees", /^(?:service|delivery|convenience|processing|bag|carryout|to[\s-]?go|pickup|surcharge)\s*(?:charge|fee)s?\b/],
+  ["fees", /^(?:fee|surcharge)s?\b/],
+  ["fees", /^(?:service|delivery|convenience|processing|bag|carryout|pickup)\b/],
+  ["payment", /^(?:cash|credit|debit|change|tender(?:ed)?|payment|paid|refund)\b/],
+  ["payment", /^(?:visa|mastercard|master card|amex|american express|discover|diners|jcb|unionpay)\b/],
+  ["payment", /^(?:auth|approval|aid|tvr|tsi|rrn|arqc|ref|trace|batch|seq|invoice|terminal|merchant)\b/],
+  ["payment", /^(?:number\s+of\s+items|items?\s+sold|item\s+count)\b/],
+];
+
+/// Words allowed to trail a summary label without turning the row into a
+/// product: qualifiers, rates, counts, payment metadata. Anything outside this
+/// set — "cabernet", "whisky", "burger" — means the label was part of a real
+/// item name and the row must be kept.
+const SUMMARY_FILLER_TOKENS = new Set([
+  "a", "an", "the", "and", "of", "on", "at", "for", "to", "in", "per",
+  "due", "paid", "payable", "owed", "charge", "charged", "charges",
+  "tender", "tendered", "amount", "amt", "balance", "total", "subtotal", "sub",
+  "sales", "sale", "tax", "taxes", "taxable", "rate", "incl", "included",
+  "including", "excl", "excluding", "item", "items", "count", "qty", "quantity",
+  "number", "num", "no", "sold", "line", "lines", "usd", "ea", "each",
+  "net", "gross", "order", "check", "transaction", "trans", "visit", "purchase",
+  "savings", "saved", "discount", "discounts", "coupon", "coupons", "promo",
+  "tip", "gratuity", "cash", "credit", "debit", "card", "change", "payment",
+  "grand", "final", "new", "prior", "previous", "current", "before", "after",
+  "percent", "pct", "approx", "est", "estimated", "code", "id", "ref",
+  "seq", "batch", "trace", "terminal", "term", "reg", "register", "store",
+  "merchant", "acct", "account", "auth", "approval", "chip", "swiped",
+  "contactless", "entry", "method", "type", "name", "holder", "signature",
+  "service", "fee", "fees", "surcharge", "today", "you", "your", "we",
+]);
+
+/// The role a label carries, or null when the text is a purchased item.
+///
+/// A summary row is its label and nothing else. Match the label at the start,
+/// then require whatever follows to be filler; if a substantive word survives,
+/// this is a product that happens to share a word with a summary label.
+function summaryRoleForLabel(text) {
+  // Receipts arrive with the label dressed up — "**** TOTAL" on Costco,
+  // "**TOTAL**" wherever Mistral decides the line was bold. Anchoring has to
+  // happen past that, not before it.
+  const lower = String(text || "").toLowerCase().trim().replace(/^[^a-z0-9]+/, "");
+  if (!lower) return null;
+
+  for (const [role, pattern] of SUMMARY_ROLE_PATTERNS) {
+    if (!pattern.test(lower)) continue;
+    const residue = lower.replace(pattern, " ");
+    const words = residue.match(/[a-z]+/g) || [];
+    if (words.every(word => SUMMARY_FILLER_TOKENS.has(word))) return role;
+  }
+  return null;
+}
+
 function summaryRoleForLine(line) {
   const lower = cleanOcrLine(line).toLowerCase();
   if (isLikelySuggestedTipRowText(lower)) return "payment";
-  if (/\bsub\s*total\b|\bsubtotal\b/.test(lower)) return "subtotal";
-  if (/\b(?:sales\s*)?tax\b|\bhst\b|\bgst\b|\bpst\b|\bvat\b/.test(lower)) return "tax";
-  if (/\btip\b|\bgratuity\b/.test(lower)) return "tip";
-  if (/\b(?:service|delivery|bag|convenience|processing|surcharge|fee|charge)\b/.test(lower)) return "fees";
-  if (/\b(?:order|total|member|instant|promo|coupon)\s+(?:discount|savings?)\b|\byou saved\b|\btotal savings\b/.test(lower)) return "orderLevelDiscount";
-  if (/\b(?:grand\s+total|balance\s+due|amount\s+due|total\s+due|order\s+total|sale\s+total|total)\b/.test(lower)) return "grandTotal";
-  if (/\b(?:cash|tender(?:ed)?|paid|payment|change|refund)\b/.test(lower)) return "payment";
-  return null;
+  return summaryRoleForLabel(lower);
 }
 
 function isDiscountLine(line) {
@@ -1599,17 +1690,40 @@ function inferItemCode(line, name) {
   return match?.[0] || null;
 }
 
+/// True when nothing is left of a row but pricing scaffolding — "lb", "ea",
+/// "@". Such a row is the continuation of the item named on the line above, so
+/// its remains must never be mistaken for a name of its own.
+function isUnitNoiseOnly(text) {
+  const words = String(text || "").toLowerCase().match(/[a-z]+/g);
+  if (!words) return true;
+  return words.every(word =>
+    ["lb", "lbs", "pound", "pounds", "ea", "each", "oz", "kg", "g", "ml", "l", "x", "at", "per"].includes(word)
+  );
+}
+
+/// Order matters here, and getting it wrong cost every by-weight grocery row
+/// its name. Stripping the leading quantity first consumed the "0.98" that the
+/// weighted-price pattern needs to anchor on, so "0.98 lb @ $0.79/lb" survived
+/// as "lb @ $0.79" — long enough and letter-y enough to pass for a name, which
+/// suppressed the merge with "ORGANIC BANANAS" on the line above. Produce, meat
+/// and deli are most of a grocery run, so this was most of the receipt. The
+/// price patterns now run while their anchors are still present, and the
+/// leading quantity goes last.
 function normalizeFallbackItemName(line, amount, pendingName = "") {
   let name = removeAmountText(line, amount)
+    .replace(/\b\d+(?:\.\d+)?\s*(?:lb|lbs|pound|pounds)\b.*?(?:@|x)\s*\$?\s*\d+(?:\.\d{2})?/ig, " ")
+    .replace(/\b\d+(?:\.\d+)?\s*(?:@|x)\s*\$?\s*\d+\.\d{2}\b/ig, " ")
+    .replace(/\/\s*(?:lb|lbs|pound|pounds|ea|each)\b/ig, " ")
     .replace(/^\s*\d+(?:\.\d+)?\s+(?=[A-Za-z])/, "")
     .replace(/\b(?:NF|TX|TAXABLE|T|F)\b$/i, "")
-    .replace(/\b\d+(?:\.\d+)?\s*(?:lb|lbs|pound|pounds)\b.*?(?:@|x)\s*\$?\s*\d+(?:\.\d{2})?/ig, " ")
-    .replace(/\b\d+(?:\.\d+)?\s*(?:@|x)\s*\$?\s*\d+(?:\.\d{2})?\b/ig, " ")
-    .replace(/\/\s*(?:lb|lbs|pound|pounds)\b/ig, " ")
     .replace(/\s+/g, " ")
     .trim();
-  if (pendingName && (!isLikelyReceiptItemName(name) || name.length < 4)) {
-    name = `${pendingName} ${name}`.trim();
+  if (pendingName) {
+    if (isUnitNoiseOnly(name)) {
+      name = pendingName;
+    } else if (!isLikelyReceiptItemName(name) || name.length < 4) {
+      name = `${pendingName} ${name}`.trim();
+    }
   }
   return normalizeItemName(name);
 }
@@ -1775,6 +1889,33 @@ function buildReceiptFromMistralOcrText(ocrText, reqId = "ocr_text_fallback") {
   return receipt;
 }
 
+/// Does a candidate's own arithmetic hold up? Rows that sum to the printed
+/// subtotal — or to the total once tax, tip and fees are accounted for — are
+/// evidence the itemization is real rather than merely long.
+function receiptItemsReconcile(receipt, tolerance = 0.02) {
+  if (!receipt) return false;
+  const items = Array.isArray(receipt.items) ? receipt.items : [];
+  if (!items.length) return false;
+
+  const itemSum = round2(items.reduce((sum, item) => sum + (item.printedAmount ?? item.amount ?? 0), 0));
+  if (receipt.subtotal != null && Math.abs(itemSum - receipt.subtotal) <= tolerance) return true;
+  if (receipt.grandTotal != null) {
+    const derived = round2(
+      itemSum + (receipt.tax ?? 0) + (receipt.tip ?? 0) + (receipt.fees ?? 0) - (receipt.orderLevelDiscount ?? 0)
+    );
+    if (Math.abs(derived - receipt.grandTotal) <= tolerance) return true;
+  }
+  return false;
+}
+
+/// Whether the markdown scrape is better evidence than the model's own
+/// structured read.
+///
+/// Row count alone used to decide this, and row count is exactly what the
+/// scraper inflates: it reads any line ending in a number as an item, so
+/// "Earn 5% every day  1.00" and "Rate us online  5.00" became purchases. A
+/// three-item receipt scraped into six then beat the correct parse on count
+/// and replaced it. Extra rows now have to add up before they count as detail.
 function shouldPreferOcrTextFallback(parsed, fallback) {
   if (!fallback) return false;
   if (!parsed) return true;
@@ -1782,12 +1923,14 @@ function shouldPreferOcrTextFallback(parsed, fallback) {
   const fallbackItemCount = Array.isArray(fallback.items) ? fallback.items.length : 0;
   if (fallbackItemCount === 0) return false;
   if (parsedItemCount === 0) return true;
+
+  // A structured parse whose own math closes is never worth trading for a
+  // regex scrape of the same page.
+  if (receiptItemsReconcile(parsed)) return false;
+
   if (parsedItemCount <= 1 && fallbackItemCount >= 2) return true;
   if (parsed.grandTotal == null && fallback.grandTotal != null) return true;
-  if (fallbackItemCount >= parsedItemCount + 3) {
-    if (parsed.grandTotal == null || fallback.grandTotal == null) return true;
-    if (Math.abs(parsed.grandTotal - fallback.grandTotal) <= 0.03) return true;
-  }
+  if (fallbackItemCount >= parsedItemCount + 3 && receiptItemsReconcile(fallback)) return true;
   return false;
 }
 
@@ -2024,23 +2167,19 @@ function normalizeParsedReceipt(parsed) {
 // STAGE 3B: NON-ITEM ROW GUARD + DISCOUNT MODE RESOLUTION
 // ============================================================
 
+/// Whether a row the model returned as an item is really a summary line.
+///
+/// Shares one anchored label table with `summaryRoleForLine`, so the guard on
+/// the structured path and the guard on the markdown-scrape path cannot drift
+/// apart — they were previously two separate keyword lists with two separate
+/// versions of the same bug.
 function isLikelyNonItemRow(name) {
   const lower = String(name || "").toLowerCase().trim();
   if (lower.length < 2) return true;
 
-  if (/\d+(\.\d+)?\s*(oz|lb|lbs|g|kg|ml|l)\b/i.test(lower)) return false;
-
-  const word = kw => new RegExp(`\\b${kw}\\b`, "i").test(lower);
-
   if (isLikelySuggestedTipRowText(lower)) return true;
   if (/^\s*(?:[1-4]?\d|50)\s*%/.test(lower)) return true;
-  if (["visa", "mastercard", "amex", "discover", "auth code", "approval", "aid:", "tvr:", "rrn:"].some(kw => lower.includes(kw))) return true;
-  if (!lower.includes("items") && ["subtotal", "net sales", "net sale", "net total", "balance due", "amount due", "grand total", "order total", "transaction total"].some(kw => lower.includes(kw))) return true;
-  if (word("total") && !lower.includes("items")) return true;
-  if (["tax", "tip", "gratuity", "hst", "gst", "pst", "vat"].some(kw => word(kw))) return true;
-  if (["discount", "savings", "saved", "coupon", "promo", "promotion"].some(kw => lower.includes(kw))) return true;
-
-  return false;
+  return summaryRoleForLabel(lower) !== null;
 }
 
 function stripNonItemRows(items, reqId) {
@@ -3923,10 +4062,17 @@ export {
   buildReceiptFromMistralOcrText,
   extractFallbackBankTransactionsFromOcrText,
   hashIdentifier,
+  isLikelyNonItemRow,
+  isLikelySuggestedTipRowText,
   normalizeAnalyticsFailureReason,
+  normalizeParsedReceipt,
+  receiptItemsReconcile,
   reconcileReceipt,
   resolveFinancialContradictions,
   sanitizeAnalyticsProperties,
   safeString,
+  selectMistralReceiptCandidate,
+  shouldPreferOcrTextFallback,
   summarizeAnalytics,
+  summaryRoleForLine,
 };
