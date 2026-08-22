@@ -1136,6 +1136,7 @@ Important:
 7. Put receipt-level/order-wide discounts or coupons in orderLevelDiscount only when they are separate summary discounts, not already reflected in item amounts.
 8. grandTotal is the final payable/charged total, not subtotal, net sales, net total, savings, cash tendered, change, or authorization metadata.
 9. If the receipt has NET SALES plus TAX, grandTotal should be NET SALES + TAX plus any visible tip/fees minus visible order discount.
+10. Printed suggested tip tables are not actual tips. Ignore rows such as "Tip Amount Total", "15% $2.54 $19.50", or other suggested gratuity options unless a filled-in/handwritten tip or final charged total shows that tip was actually paid.
 
 Return JSON only. Use null for uncertain totals.`;
 
@@ -1152,7 +1153,38 @@ Rules:
 5. Use null for uncertain fields, and lower confidence when the image is blurry or totals conflict.
 6. Return JSON only.`;
 
-function buildReceiptPromptWithLocalHints(localHints, appleOcrText, localParseResult) {
+function formatLocalCandidateEvidence(localCandidates) {
+  if (!Array.isArray(localCandidates) || !localCandidates.length) return [];
+  return localCandidates.slice(0, 4).map((candidate, index) => {
+    const source = safeString(candidate?.source || `candidate_${index + 1}`).slice(0, 80);
+    const selected = candidate?.selected ? "selected" : "alternate";
+    const trusted = candidate?.trusted ? "trusted" : "untrusted";
+    const merchant = safeString(candidate?.merchant || "").slice(0, 100);
+    const total = candidate?.grandTotal ?? null;
+    const subtotal = candidate?.subtotal ?? null;
+    const tax = candidate?.tax ?? null;
+    const itemCount = Number.isFinite(candidate?.itemCount) ? candidate.itemCount : 0;
+    const itemSum = candidate?.itemSum ?? null;
+    const score = candidate?.selectionScore ?? null;
+    const status = safeString(candidate?.verificationStatus || candidate?.validationStatus || "unknown").slice(0, 80);
+    const items = Array.isArray(candidate?.items)
+      ? candidate.items.slice(0, 16).map(item => {
+          const name = safeString(item?.name || "").slice(0, 90);
+          const amount = item?.amount ?? null;
+          const discount = item?.discount ?? null;
+          return `${name}=${amount}${discount ? ` discount=${discount}` : ""}`;
+        }).filter(Boolean)
+      : [];
+    return [
+      `${source} (${selected}, ${trusted}, status=${status}, score=${score})`,
+      merchant ? `merchant=${merchant}` : null,
+      `total=${total} subtotal=${subtotal} tax=${tax} itemCount=${itemCount} itemSum=${itemSum}`,
+      items.length ? `items: ${items.join("; ")}` : null,
+    ].filter(Boolean).join(" | ");
+  });
+}
+
+function buildReceiptPromptWithLocalHints(localHints, appleOcrText, localParseResult, localCandidates) {
   const hintLines = [];
   if (localHints && typeof localHints === "object") {
     if (localHints.merchantCandidate) hintLines.push(`merchantCandidate: ${safeString(localHints.merchantCandidate).slice(0, 120)}`);
@@ -1165,14 +1197,19 @@ function buildReceiptPromptWithLocalHints(localHints, appleOcrText, localParseRe
     if (localHints.fallbackReason) hintLines.push(`localFallbackReason: ${safeString(localHints.fallbackReason).slice(0, 240)}`);
   }
 
-  if (!hintLines.length) return EXTRACTION_PROMPT;
+  const candidateLines = formatLocalCandidateEvidence(localCandidates);
+
+  if (!hintLines.length && !candidateLines.length) return EXTRACTION_PROMPT;
 
   return `${EXTRACTION_PROMPT}
 
-Optional local summary hints from the device are provided below. Use them only to anchor merchant/totals when they are visibly supported by the receipt image. Do not use local OCR item rows.
+Optional local evidence from the device is provided below. Use it only when visibly supported by the receipt image. Treat candidates as competing hypotheses, not truth. Prefer totals/items that agree with the image and arithmetic. Do not copy local item rows that are dirty, duplicated, footer/payment rows, or unsupported by the image.
 
 Local summary hints:
-${hintLines.map(line => `- ${line}`).join("\n")}`;
+${hintLines.map(line => `- ${line}`).join("\n")}
+
+Local candidate parses:
+${candidateLines.map(line => `- ${line}`).join("\n")}`;
 }
 
 const ITEM_NAME_NORMALIZATION_PROMPT = `
@@ -1490,9 +1527,25 @@ function isLikelyReceiptItemName(text) {
   return true;
 }
 
+function isLikelySuggestedTipRowText(text) {
+  const lower = cleanOcrLine(text).toLowerCase();
+  if (!lower) return false;
+  if (/\bsuggest(?:ed|ions?)?\b.*\b(?:tip|gratuity)\b/.test(lower)) return true;
+  if (/\b(?:tip|gratuity)\b.*\bsuggest(?:ed|ions?)?\b/.test(lower)) return true;
+  if (/\b(?:tip|gratuity)\b.*\bamount\b.*\btotal\b/.test(lower)) return true;
+
+  const hasTipTablePercent = /\b(?:[1-4]?\d|50)\s*%/.test(lower);
+  if (!hasTipTablePercent) return false;
+
+  const amountCount = amountMatchesInText(lower).length;
+  const hasTipTableTerms = /\b(?:tip|gratuity|amount|total)\b/.test(lower);
+  return hasTipTableTerms || amountCount >= 2 || /^\s*(?:[1-4]?\d|50)\s*%/.test(lower);
+}
+
 function isReceiptMetadataLine(line) {
   const lower = cleanOcrLine(line).toLowerCase();
   if (!lower) return true;
+  if (isLikelySuggestedTipRowText(lower)) return true;
   if (/^[-=_]{2,}$/.test(lower)) return true;
   if (/^(qty|quantity|item|description|price|amount|total)\b(?:\s+\w+)*$/.test(lower)) return true;
   if (/\b(?:tel|phone|address|street|avenue|road|blvd|suite|www\.|http|email)\b/.test(lower)) return true;
@@ -1505,6 +1558,7 @@ function isReceiptMetadataLine(line) {
 
 function summaryRoleForLine(line) {
   const lower = cleanOcrLine(line).toLowerCase();
+  if (isLikelySuggestedTipRowText(lower)) return "payment";
   if (/\bsub\s*total\b|\bsubtotal\b/.test(lower)) return "subtotal";
   if (/\b(?:sales\s*)?tax\b|\bhst\b|\bgst\b|\bpst\b|\bvat\b/.test(lower)) return "tax";
   if (/\btip\b|\bgratuity\b/.test(lower)) return "tip";
@@ -1618,6 +1672,10 @@ function buildReceiptFromMistralOcrText(ocrText, reqId = "ocr_text_fallback") {
 
   for (const line of lines) {
     if (merchant && normalizeMerchant(line) === merchant) {
+      pendingName = "";
+      continue;
+    }
+    if (isLikelySuggestedTipRowText(line)) {
       pendingName = "";
       continue;
     }
@@ -1802,7 +1860,12 @@ async function callMistralOCR(imageBuffer, mimeType, reqId, options = {}) {
     mimeType,
     reqId,
     documentAnnotationFormat: responseFormatFromZodObject(MistralReceiptSchema),
-    documentAnnotationPrompt: buildReceiptPromptWithLocalHints(options.localHints, options.appleOcrText, options.localParseResult),
+    documentAnnotationPrompt: buildReceiptPromptWithLocalHints(
+      options.localHints,
+      options.appleOcrText,
+      options.localParseResult,
+      options.localCandidates
+    ),
   });
 
   let parsed = null;
@@ -1969,6 +2032,8 @@ function isLikelyNonItemRow(name) {
 
   const word = kw => new RegExp(`\\b${kw}\\b`, "i").test(lower);
 
+  if (isLikelySuggestedTipRowText(lower)) return true;
+  if (/^\s*(?:[1-4]?\d|50)\s*%/.test(lower)) return true;
   if (["visa", "mastercard", "amex", "discover", "auth code", "approval", "aid:", "tvr:", "rrn:"].some(kw => lower.includes(kw))) return true;
   if (!lower.includes("items") && ["subtotal", "net sales", "net sale", "net total", "balance due", "amount due", "grand total", "order total", "transaction total"].some(kw => lower.includes(kw))) return true;
   if (word("total") && !lower.includes("items")) return true;
@@ -1992,6 +2057,49 @@ function stripNonItemRows(items, reqId) {
     console.log(`[${reqId}] Stripped ${dropped.length} non-item row(s): ${dropped.map(d => d.name).join(", ")}`);
   }
   return { kept, dropped };
+}
+
+function suppressUnchargedSuggestedTip(receipt, reqId) {
+  const tip = receipt.tip ?? 0;
+  const grandTotal = receipt.grandTotal;
+  if (!(tip > 0) || grandTotal == null) {
+    return { receipt, suppressed: false, reason: null };
+  }
+
+  const itemSum = round2((receipt.items || []).reduce((sum, item) => sum + (item.amount || item.printedAmount || 0), 0));
+  const basis = receipt.subtotal != null ? receipt.subtotal : (itemSum > 0 ? itemSum : null);
+  if (basis == null) {
+    return { receipt, suppressed: false, reason: null };
+  }
+
+  const tax = receipt.tax ?? 0;
+  const fees = receipt.fees ?? 0;
+  const orderDiscount = receipt.orderLevelDiscount ?? 0;
+  const totalWithoutTip = round2(basis + tax + fees - orderDiscount);
+  const totalWithTip = round2(totalWithoutTip + tip);
+  const withoutTipGap = round2(Math.abs(totalWithoutTip - grandTotal));
+  const withTipGap = round2(Math.abs(totalWithTip - grandTotal));
+
+  if (withoutTipGap <= 0.03 && withTipGap > 0.03) {
+    const nextReceipt = {
+      ...receipt,
+      tip: 0,
+      notes: [
+        receipt.notes,
+        `Ignored likely suggested tip $${tip.toFixed(2)} because the charged total already reconciles without tip.`,
+      ].filter(Boolean).join(" "),
+    };
+    if (reqId) {
+      console.log(`[${reqId}] Suppressed uncharged suggested tip $${tip.toFixed(2)}; total_without_tip=${totalWithoutTip.toFixed(2)} grand_total=${grandTotal.toFixed(2)}`);
+    }
+    return {
+      receipt: nextReceipt,
+      suppressed: true,
+      reason: `Ignored likely suggested tip $${tip.toFixed(2)}; charged total reconciles without tip.`,
+    };
+  }
+
+  return { receipt, suppressed: false, reason: null };
 }
 
 function mergeStrayDuplicateRows(items, reqId) {
@@ -2225,15 +2333,18 @@ function resolveFinancialContradictions(normalized, reqId) {
     };
   });
 
-  const receipt = {
+  let receipt = {
     ...normalized,
     items,
   };
+  const suggestedTipSuppression = suppressUnchargedSuggestedTip(receipt, reqId);
+  receipt = suggestedTipSuppression.receipt;
 
   const changes = [
     ...stripped.dropped.map(item => `Removed non-item row: "${item.name}"`),
+    suggestedTipSuppression.reason,
     "Preserved Mistral final item amounts without discount-mode rewriting.",
-  ];
+  ].filter(Boolean);
 
   const reconciliation = reconcileReceipt(receipt);
   if (!reconciliation.mathCheckPassed && reconciliation.mismatchReasons.length > 0) {
@@ -2657,6 +2768,7 @@ app.post("/parse-receipt-staged", requireAppAuth, async (req, res) => {
       appleOcrText = "",
       localHints = null,
       localParseResult = null,
+      localCandidates = null,
     } = req.body || {};
     if (!imageBase64) {
       return res.status(400).json({ ok: false, request_id: reqId, error: { code: "MISSING_IMAGE", message: "Missing imageBase64 in request body" } });
@@ -2733,6 +2845,7 @@ app.post("/parse-receipt-staged", requireAppAuth, async (req, res) => {
       appleOcrText,
       localHints,
       localParseResult,
+      localCandidates,
     })
       .then(result => {
         job.result = result;
