@@ -44,13 +44,25 @@ const ALLOWED_MIME_TYPES = new Set([
 const parseCache = new Map();
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 10 * 60 * 1000);
 const MAX_PARSE_CACHE_ENTRIES = Number(process.env.MAX_PARSE_CACHE_ENTRIES || 250);
+// The client gives /parse-receipt 30s. Budget so OCR can finish and the item
+// name pass (6s) still fits inside that, leaving the server room to answer with
+// a real error instead of the client timing out on its own.
+//
+// The old 10s ceiling was below what Mistral needs to OCR a photographed
+// receipt and annotate it, so slower pages were abandoned mid-flight and came
+// back as 504s — a timeout budget that expired before the provider could
+// answer, not a provider that was too slow.
 const MISTRAL_OCR_TIMEOUT_MS = Number(
-  process.env.MISTRAL_OCR_TIMEOUT_MS || process.env.RECEIPT_OCR_TIMEOUT_MS || 10000
+  process.env.MISTRAL_OCR_TIMEOUT_MS || process.env.RECEIPT_OCR_TIMEOUT_MS || 22000
 );
 const QUICK_TOTAL_TIMEOUT_MS = Number(process.env.QUICK_TOTAL_TIMEOUT_MS || 5000);
 const ENABLE_STAGED_QUICK_TOTAL = process.env.ENABLE_STAGED_QUICK_TOTAL === "true";
 const STAGED_FIRST_RESPONSE_TIMEOUT_MS = Number(process.env.STAGED_FIRST_RESPONSE_TIMEOUT_MS || 1200);
 const ENABLE_MISTRAL_WORD_CONFIDENCE = process.env.ENABLE_MISTRAL_WORD_CONFIDENCE === "true";
+const APPLE_OCR_CONTEXT_MAX_CHARS = Number(process.env.APPLE_OCR_CONTEXT_MAX_CHARS || 6000);
+const LOCAL_PARSE_CONTEXT_MAX_ITEMS = Number(process.env.LOCAL_PARSE_CONTEXT_MAX_ITEMS || 40);
+const RECEIPT_ARBITRATION_DEBUG =
+  process.env.RECEIPT_ARBITRATION_DEBUG === "true" || ENABLE_DEBUG_RESPONSE;
 const stagedReceiptJobs = new Map();
 const stagedReceiptHashIndex = new Map();
 const STAGED_RECEIPT_JOB_TTL_MS = Number(process.env.STAGED_RECEIPT_JOB_TTL_MS || 15 * 60 * 1000);
@@ -1118,27 +1130,42 @@ function reconcileBankDocument(bankDocument) {
 // MISTRAL EXTRACTION PROMPT
 // ============================================================
 
-const EXTRACTION_PROMPT = `Read this receipt like a simple bill-splitting scanner.
+const EXTRACTION_PROMPT = `Read this receipt like a careful bill-splitting scanner.
 
-Return the merchant name, final total, purchased item rows, and simple receipt-level summary adjustments.
+Goal:
+Return the merchant name, final charged/owed total, actual purchased item rows, and visible receipt-level adjustments. Use the receipt image as primary evidence. OCR text and local parser data are independent evidence that may help resolve ambiguity, but they may also contain recognition or grouping errors.
 
-For each item:
-- name: the visible item name.
-- printedAmount: the final value the user should split for that item.
+Core evidence rules:
+1. Never invent missing products, prices, tax, fees, tips, discounts, quantities, dates, or totals.
+2. Use null for genuinely uncertain summary fields. A partial supported result is better than fabricated completeness.
+3. Do not omit an item merely because one OCR source is uncertain when the image or another OCR source clearly supports it.
+4. When two plausible readings of an amount exist, prefer the interpretation that is both visually supported and mathematically consistent with the receipt.
+5. Math may resolve ambiguity, but math must not override a visually impossible reading.
 
-Important:
-1. Do not output subtotal, tax, tip, fees, total, payment, change, card/auth, rewards, coupon, savings, or discount-only rows as items.
-2. If an item discount is clearly applied to an item, printedAmount must be the after-discount item value. If the receipt already prints the after-discount value, use that value directly.
-3. discountAmount and discountLabel are optional display metadata only. They must never change printedAmount.
-4. Keep duplicate purchases as separate items when they are actually separate purchased rows.
-5. Do not invent missing rows or prices. If a row is unclear, omit it instead of guessing.
-6. Put visible sales tax in tax, visible tip/gratuity in tip, and visible service/delivery/bag/card fees in fees.
-7. Put receipt-level/order-wide discounts or coupons in orderLevelDiscount only when they are separate summary discounts, not already reflected in item amounts.
-8. grandTotal is the final payable/charged total, not subtotal, net sales, net total, savings, cash tendered, change, or authorization metadata.
-9. If the receipt has NET SALES plus TAX, grandTotal should be NET SALES + TAX plus any visible tip/fees minus visible order discount.
-10. Printed suggested tip tables are not actual tips. Ignore rows such as "Tip Amount Total", "15% $2.54 $19.50", or other suggested gratuity options unless a filled-in/handwritten tip or final charged total shows that tip was actually paid.
+Purchased item rules:
+- An item row is merchandise or service the customer actually purchased.
+- name is the visible item name, short and literal.
+- printedAmount is the final merchandise/service value for that item row. Do not allocate tax, fees, or tip into item prices.
+- If an item-level discount is visibly applied and the printed item value already reflects it, printedAmount is that after-discount value.
+- discountAmount and discountLabel are display metadata only. They must never cause printedAmount to be subtracted again.
+- Keep duplicate purchases as separate items only when they are actual separate purchased rows.
 
-Return JSON only. Use null for uncertain totals.`;
+Never output these as purchased items:
+SUBTOTAL, TAX, SALES TAX, TOTAL, BALANCE, AMOUNT DUE, NET SALES, NET TOTAL, CHANGE, CASH, CREDIT, DEBIT, VISA, MASTERCARD, AMEX, suggested gratuity rows, tip suggestions, loyalty points, rewards, savings summaries, payment methods, transaction IDs, authorization codes, and discount-only rows.
+
+Summary field rules:
+- subtotal is merchandise/service amount before tax, tip, and external fees, after discounts when the receipt defines it that way.
+- tax is only visible actual tax. Do not infer tax because receipts often have tax.
+- fees are only visible charged fees such as service, delivery, bag, card surcharge, convenience, pickup, or processing fees.
+- tip is only an actually charged gratuity/tip. Never use suggested tip tables or suggested dollar amounts.
+- orderLevelDiscount is a visible order-wide discount/coupon not already reflected in item printedAmount values.
+- grandTotal is the final charged or owed transaction amount. Strong labels include TOTAL, GRAND TOTAL, AMOUNT DUE, BALANCE DUE, and ORDER TOTAL. Payment amount context can support it.
+- Do not treat NET SALES as grandTotal. NET SALES normally behaves like pre-tax subtotal. Be very cautious with NET TOTAL unless final payment/due context proves it is the charged total.
+
+Internal math check:
+Compute itemSum = sum(final item printedAmount values). Compare itemSum with subtotal when subtotal is visible. Compare itemSum + tax + tip + fees - orderLevelDiscount with grandTotal. Do not expose this reasoning. Return structured JSON only.
+
+Return JSON only.`;
 
 const QUICK_TOTAL_PROMPT = `You extract only receipt summary totals with extremely high financial accuracy.
 
@@ -1152,6 +1179,97 @@ Rules:
 4. If multiple totals are visible, choose the amount closest to the final payable/charged amount and put the printed label in totalLabel.
 5. Use null for uncertain fields, and lower confidence when the image is blurry or totals conflict.
 6. Return JSON only.`;
+
+function compactAppleOcrText(appleOcrText, maxChars = APPLE_OCR_CONTEXT_MAX_CHARS) {
+  const rawLines = String(appleOcrText || "")
+    .split(/\r?\n/)
+    .map(line => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  if (!rawLines.length) return "";
+
+  const deduped = [];
+  const seen = new Set();
+  for (const line of rawLines) {
+    const key = line.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(line);
+  }
+
+  const joined = deduped.join("\n");
+  if (joined.length <= maxChars) return joined;
+
+  const receiptLike = [];
+  const context = [];
+  for (const line of deduped) {
+    if (
+      amountMatchesInText(line).length ||
+      summaryRoleForLine(line) ||
+      /\b(?:receipt|cashier|server|order|invoice|merchant|visa|mastercard|amex|discover|auth|approval|subtotal|tax|total|balance|amount due|change|tip|fee|discount|coupon|savings?)\b/i.test(line)
+    ) {
+      receiptLike.push(line);
+    } else if (context.length < 12) {
+      context.push(line);
+    }
+  }
+
+  const prioritized = [...context.slice(0, 6), ...receiptLike, ...context.slice(6)];
+  let output = "";
+  for (const line of prioritized) {
+    const next = output ? `${output}\n${line}` : line;
+    if (next.length > maxChars) break;
+    output = next;
+  }
+  return output || joined.slice(0, maxChars);
+}
+
+function compactLocalParseResult(localParseResult) {
+  if (!localParseResult || typeof localParseResult !== "object") return "";
+  const lines = [];
+  const merchant = safeString(localParseResult.merchant || "").slice(0, 120);
+  if (merchant) lines.push(`merchant: ${merchant}`);
+  if (localParseResult.receiptDate || localParseResult.date) {
+    lines.push(`date: ${safeString(localParseResult.receiptDate || localParseResult.date).slice(0, 60)}`);
+  }
+
+  const items = Array.isArray(localParseResult.items) ? localParseResult.items : [];
+  if (items.length) {
+    lines.push(`items (${items.length}${items.length > LOCAL_PARSE_CONTEXT_MAX_ITEMS ? `, showing ${LOCAL_PARSE_CONTEXT_MAX_ITEMS}` : ""}):`);
+    for (const item of items.slice(0, LOCAL_PARSE_CONTEXT_MAX_ITEMS)) {
+      const name = safeString(item?.name || item?.rawName || "").slice(0, 100);
+      const amount = item?.amount ?? item?.printedAmount ?? null;
+      const qty = item?.qty ?? item?.quantity ?? null;
+      const unitPrice = item?.unitPrice ?? null;
+      const weightLbs = item?.weightLbs ?? null;
+      const confidence = item?.confidence ?? item?.confidenceLabel ?? null;
+      if (!name && amount == null) continue;
+      lines.push(`- ${name || "unnamed"} = ${amount}${qty != null ? ` qty=${qty}` : ""}${unitPrice != null ? ` unit=${unitPrice}` : ""}${weightLbs != null ? ` weightLbs=${weightLbs}` : ""}${confidence ? ` confidence=${safeString(confidence).slice(0, 40)}` : ""}`);
+    }
+  }
+
+  const summaryFields = [
+    ["subtotal", localParseResult.subtotal],
+    ["tax", localParseResult.tax],
+    ["tip", localParseResult.tip],
+    ["fees", localParseResult.fees],
+    ["orderLevelDiscount", localParseResult.orderLevelDiscount ?? localParseResult.discount],
+    ["grandTotal", localParseResult.grandTotal ?? localParseResult.total],
+    ["confidence", localParseResult.confidence ?? localParseResult.confidenceLabel],
+  ].filter(([, value]) => value != null && value !== "");
+  if (summaryFields.length) {
+    lines.push(`summary: ${summaryFields.map(([key, value]) => `${key}=${safeString(value).slice(0, 60)}`).join(" ")}`);
+  }
+
+  const summaryRows = localParseResult.candidateSummaryRows || localParseResult.summaryRows;
+  if (Array.isArray(summaryRows) && summaryRows.length) {
+    lines.push("candidate summary rows:");
+    for (const row of summaryRows.slice(0, 12)) {
+      lines.push(`- ${safeString(typeof row === "string" ? row : JSON.stringify(row)).slice(0, 180)}`);
+    }
+  }
+
+  return lines.join("\n");
+}
 
 function formatLocalCandidateEvidence(localCandidates) {
   if (!Array.isArray(localCandidates) || !localCandidates.length) return [];
@@ -1198,18 +1316,36 @@ function buildReceiptPromptWithLocalHints(localHints, appleOcrText, localParseRe
   }
 
   const candidateLines = formatLocalCandidateEvidence(localCandidates);
+  const compactApple = compactAppleOcrText(appleOcrText);
+  const compactLocal = compactLocalParseResult(localParseResult);
 
-  if (!hintLines.length && !candidateLines.length) return EXTRACTION_PROMPT;
+  if (!hintLines.length && !candidateLines.length && !compactApple && !compactLocal) return EXTRACTION_PROMPT;
+
+  const sections = [];
+  if (compactApple) {
+    sections.push(`APPLE OCR TRANSCRIPTION
+Independent OCR evidence from the device. It may contain recognition errors or broken lines. Compare it against the receipt image; do not blindly copy it.
+${compactApple}`);
+  }
+  if (compactLocal) {
+    sections.push(`LOCAL PARSER HYPOTHESIS
+This is an independent hypothesis, not ground truth. Use it when supported by the receipt image or OCR evidence. Correct it when the visual receipt contradicts it.
+${compactLocal}`);
+  }
+  if (hintLines.length) {
+    sections.push(`LOCAL SUMMARY HINTS
+${hintLines.map(line => `- ${line}`).join("\n")}`);
+  }
+  if (candidateLines.length) {
+    sections.push(`LOCAL CANDIDATE PARSES
+${candidateLines.map(line => `- ${line}`).join("\n")}`);
+  }
 
   return `${EXTRACTION_PROMPT}
 
-Optional local evidence from the device is provided below. Use it only when visibly supported by the receipt image. Treat candidates as competing hypotheses, not truth. Prefer totals/items that agree with the image and arithmetic. Do not copy local item rows that are dirty, duplicated, footer/payment rows, or unsupported by the image.
+Optional local evidence from the device is provided below. Use it only when visibly supported by the receipt image. Treat all local data as competing evidence, not truth. Prefer totals/items that agree with the image and arithmetic. Do not copy dirty, duplicated, footer/payment, or unsupported local rows.
 
-Local summary hints:
-${hintLines.map(line => `- ${line}`).join("\n")}
-
-Local candidate parses:
-${candidateLines.map(line => `- ${line}`).join("\n")}`;
+${sections.join("\n\n")}`;
 }
 
 const ITEM_NAME_NORMALIZATION_PROMPT = `
@@ -1299,14 +1435,36 @@ function normalizeMerchant(merchant) {
     .substring(0, 100);
 }
 
+/// Tax flags no product name ends in. Multi-letter, so stripping them is
+/// unambiguous.
+const UNAMBIGUOUS_TAX_FLAG = /\s+(?:NF|N\s+F|TX|TF|FT|TAXABLE)$/i;
+
+/// Single-letter flags, restricted to letters a product name does not end on.
+/// Case-sensitive: a lone capital trailing a row is a flag, a lowercase letter
+/// is a word the OCR broke apart.
+const SINGLE_LETTER_TAX_FLAG = /\s+[TFXON]$/;
+
+/// Strip the tax flag receipts print after an item, without taking the last
+/// word of the product with it.
+///
+/// The previous set included A, B and E — which is also how real products end.
+/// "Vitamin B" became "Vitamin", "Plan B" became "Plan", "Coca Cola A" became
+/// "Coca Cola". A name carrying a stray flag is a cosmetic blemish; a name
+/// missing its last word is wrong, and the user is the one who has to
+/// recognise the item when splitting the bill. So ambiguous letters stay.
 function normalizeItemName(name) {
   if (!name) return "Unknown Item";
-  
+
   let normalized = name.trim();
   normalized = normalized.replace(/^[O*\-•]\s+/, "");
-  normalized = normalized.replace(/\s+(NF|N F|T|TX|F|E|B|A)$/i, "");
+  normalized = normalized.replace(UNAMBIGUOUS_TAX_FLAG, "");
+
+  // Never strip a name down to nothing, or to a single letter.
+  const withoutFlag = normalized.replace(SINGLE_LETTER_TAX_FLAG, "").trim();
+  if (withoutFlag.length >= 2) normalized = withoutFlag;
+
   normalized = normalized.replace(/\s+/g, " ");
-  
+
   return normalized.substring(0, 200);
 }
 
@@ -1517,6 +1675,226 @@ function amountMagnitude(value) {
   return round2(Math.abs(Number(value || 0)));
 }
 
+function moneyToCents(value) {
+  if (value == null || Number.isNaN(Number(value))) return null;
+  return Math.round(Number(value) * 100);
+}
+
+function centsToMoney(value) {
+  if (value == null || !Number.isFinite(Number(value))) return null;
+  return round2(Number(value) / 100);
+}
+
+function moneyGapCents(a, b) {
+  const aCents = moneyToCents(a);
+  const bCents = moneyToCents(b);
+  if (aCents == null || bCents == null) return null;
+  return aCents - bCents;
+}
+
+function comparableText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function itemNameTokens(value) {
+  const tokens = comparableText(value)
+    .split(/\s+/)
+    .filter(token => token.length >= 2 && !SUMMARY_FILLER_TOKENS.has(token));
+  return new Set(tokens);
+}
+
+function tokenOverlapRatio(a, b) {
+  const left = itemNameTokens(a);
+  const right = itemNameTokens(b);
+  if (!left.size || !right.size) return 0;
+  let overlap = 0;
+  for (const token of left) {
+    if (right.has(token)) overlap += 1;
+  }
+  return overlap / Math.min(left.size, right.size);
+}
+
+function receiptItemSignature(item) {
+  return `${comparableText(item?.name || item?.rawName)}|${moneyToCents(item?.amount ?? item?.printedAmount) ?? "na"}`;
+}
+
+function itemMatchesEvidence(item, evidence) {
+  const itemCents = moneyToCents(item?.amount ?? item?.printedAmount);
+  if (itemCents == null || evidence?.cents == null || itemCents !== evidence.cents) return false;
+  return tokenOverlapRatio(item?.name || item?.rawName, evidence.name || evidence.line) >= 0.5;
+}
+
+function receiptHasEquivalentItem(receipt, name, amount) {
+  const cents = moneyToCents(amount);
+  return (receipt?.items || []).some(item => {
+    const itemCents = moneyToCents(item.amount ?? item.printedAmount);
+    return itemCents === cents && tokenOverlapRatio(item.name || item.rawName, name) >= 0.5;
+  });
+}
+
+function extractReceiptMoneyEvidence({ ocrText = "", appleOcrText = "" } = {}) {
+  const sources = [
+    ["mistral", ocrText],
+    ["apple", appleOcrText],
+  ];
+  const evidence = [];
+  const seen = new Set();
+
+  for (const [source, text] of sources) {
+    const lines = String(text || "")
+      .split(/\r?\n/)
+      .map(cleanOcrLine)
+      .filter(Boolean);
+
+    for (const line of lines) {
+      const amount = lastAmountNearLineEnd(line);
+      if (!amount) continue;
+      const cents = moneyToCents(amountMagnitude(amount.value));
+      if (cents == null || cents <= 0) continue;
+
+      const role = summaryRoleForLine(line);
+      const metadata = isReceiptMetadataLine(line);
+      const discount = isDiscountLine(line);
+      const name = role || metadata || discount ? "" : normalizeFallbackItemName(line, amount);
+      const itemLike = Boolean(
+        !role &&
+        !metadata &&
+        !discount &&
+        isLikelyReceiptItemName(name) &&
+        comparableText(name).length >= 2
+      );
+      const key = `${source}|${comparableText(line)}|${cents}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      evidence.push({
+        source,
+        line,
+        amount: centsToMoney(cents),
+        cents,
+        role: role || null,
+        metadata,
+        discount,
+        itemLike,
+        name,
+        netSalesLike: /^net\s+sales?\b/i.test(cleanOcrLine(line)),
+        netTotalLike: /^net\s+total\b/i.test(cleanOcrLine(line)),
+      });
+    }
+  }
+
+  return evidence;
+}
+
+function localEvidenceItems(localParseResult, localCandidates) {
+  const items = [];
+  const pushItem = (item, source) => {
+    const name = safeString(item?.name || item?.rawName || "").slice(0, 140);
+    const amount = toNumber(item?.amount ?? item?.printedAmount);
+    if (!name || amount == null || amount < 0.01 || isLikelyNonItemRow(name)) return;
+    items.push({
+      source,
+      name: normalizeItemName(name),
+      amount,
+      cents: moneyToCents(amount),
+      confidence: item?.confidence ?? item?.confidenceLabel ?? null,
+    });
+  };
+
+  for (const item of Array.isArray(localParseResult?.items) ? localParseResult.items : []) {
+    pushItem(item, "localParseResult");
+  }
+  for (const candidate of Array.isArray(localCandidates) ? localCandidates : []) {
+    for (const item of Array.isArray(candidate?.items) ? candidate.items : []) {
+      pushItem(item, `localCandidate:${safeString(candidate?.source || "unknown").slice(0, 60)}`);
+    }
+  }
+  return items;
+}
+
+function buildParsedReceiptFromLocalParse(localParseResult) {
+  if (!localParseResult || typeof localParseResult !== "object") return null;
+  const rawItems = Array.isArray(localParseResult.items) ? localParseResult.items : [];
+  if (!rawItems.length && localParseResult.grandTotal == null && localParseResult.total == null) return null;
+
+  return {
+    merchant: localParseResult.merchant || "",
+    receiptDate: localParseResult.receiptDate || localParseResult.date || null,
+    currency: localParseResult.currency || "USD",
+    items: rawItems.map(item => ({
+      name: item?.name || item?.rawName || "Unknown Item",
+      printedAmount: item?.amount ?? item?.printedAmount,
+      discountAmount: item?.discountAmount ?? null,
+      discountLabel: item?.discountLabel ?? null,
+      itemCode: item?.itemCode ?? null,
+      qty: item?.qty ?? item?.quantity ?? null,
+      unitPrice: item?.unitPrice ?? null,
+      weightLbs: item?.weightLbs ?? null,
+      sourceText: item?.sourceText ?? null,
+    })),
+    subtotal: localParseResult.subtotal ?? null,
+    tax: localParseResult.tax ?? null,
+    tip: localParseResult.tip ?? null,
+    fees: localParseResult.fees ?? null,
+    orderLevelDiscount: localParseResult.orderLevelDiscount ?? localParseResult.discount ?? null,
+    grandTotal: localParseResult.grandTotal ?? localParseResult.total ?? null,
+    confidence: localParseResult.confidence || "medium",
+    notes: "Local parser hypothesis selected by backend arbitration.",
+  };
+}
+
+function cleanReceiptForCandidate(normalized, reqId) {
+  const stripped = stripNonItemRows(normalized?.items || [], reqId);
+  const items = stripped.kept.map(item => {
+    const printedAmount = round2(item.printedAmount ?? item.amount);
+    const discount = item.discountAmount ?? item.itemDiscount ?? 0;
+    return {
+      ...item,
+      printedAmount,
+      amount: round2(printedAmount),
+      originalAmount: discount > 0 ? round2(printedAmount + discount) : item.originalAmount ?? null,
+      itemDiscount: discount > 0 ? round2(discount) : item.itemDiscount ?? null,
+      itemDiscountLabel: discount > 0 ? item.discountLabel || item.itemDiscountLabel || null : item.itemDiscountLabel ?? null,
+    };
+  });
+  const withItems = { ...normalized, items };
+  const suggestedTipSuppression = suppressUnchargedSuggestedTip(withItems, reqId);
+  return {
+    receipt: suggestedTipSuppression.receipt,
+    changes: [
+      ...stripped.dropped.map(item => `Removed non-item row: "${item.name}"`),
+      suggestedTipSuppression.reason,
+    ].filter(Boolean),
+    suspicious: stripped.dropped.map((item, index) => ({ index, item, flags: ["non_item_row"] })),
+  };
+}
+
+function summaryFieldsFromLocalEvidence(localHints, localParseResult) {
+  const summary = {};
+  const assign = (key, value) => {
+    const number = toNumber(value);
+    if (number != null) summary[key] = number;
+  };
+  assign("subtotal", localParseResult?.subtotal ?? localHints?.subtotalCandidate);
+  assign("tax", localParseResult?.tax ?? localHints?.taxCandidate);
+  assign("tip", localParseResult?.tip ?? localHints?.tipCandidate);
+  assign("fees", localParseResult?.fees);
+  assign("orderLevelDiscount", localParseResult?.orderLevelDiscount ?? localParseResult?.discount);
+  assign("grandTotal", localParseResult?.grandTotal ?? localParseResult?.total ?? localHints?.grandTotalCandidate);
+  return summary;
+}
+
+function merchandiseTargetFromEvidence(receipt, localHints) {
+  const subtotalCents = moneyToCents(receipt?.subtotal);
+  if (subtotalCents != null) return { cents: subtotalCents, source: "subtotal" };
+  const target = moneyToCents(localHints?.targetMerchandiseSubtotal);
+  if (target != null) return { cents: target, source: "local_target_merchandise_subtotal" };
+  return null;
+}
+
 function removeAmountText(line, amount) {
   if (!amount) return cleanOcrLine(line);
   const escaped = amount.raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -1590,6 +1968,8 @@ function isReceiptMetadataLine(line) {
 const SUMMARY_ROLE_PATTERNS = [
   ["subtotal", /^sub[\s-]?total\b/],
   ["subtotal", /^merchandise\s+(?:sub)?total\b/],
+  ["subtotal", /^net\s+sales?\b/],
+  ["subtotal", /^net\s+total\b/],
   ["tax", /^(?:sales|state|local|city|county|food|liquor|meals?|room|use)?\s*tax(?:es)?\s*\d*\b/],
   ["tax", /^(?:hst|gst|pst|qst|vat)\b/],
   // Delivery apps name the tip after whoever earns it. Without the qualifier
@@ -1601,7 +1981,6 @@ const SUMMARY_ROLE_PATTERNS = [
   ["grandTotal", /^(?:grand|order|sale|transaction|trans|check|final|store)\s+total\b/],
   ["grandTotal", /^(?:total|balance|amount|payment)\s+(?:due|paid|payable|charged?|tendered?|owed)\b/],
   ["grandTotal", /^total\b/],
-  ["grandTotal", /^net\s+(?:sales?|total)\b/],
   ["fees", /^(?:service|delivery|convenience|processing|bag|carryout|to[\s-]?go|pickup|surcharge)\s*(?:charge|fee)s?\b/],
   ["fees", /^(?:fee|surcharge)s?\b/],
   ["fees", /^(?:service|delivery|convenience|processing|bag|carryout|pickup)\b/],
@@ -1715,7 +2094,9 @@ function normalizeFallbackItemName(line, amount, pendingName = "") {
     .replace(/\b\d+(?:\.\d+)?\s*(?:@|x)\s*\$?\s*\d+\.\d{2}\b/ig, " ")
     .replace(/\/\s*(?:lb|lbs|pound|pounds|ea|each)\b/ig, " ")
     .replace(/^\s*\d+(?:\.\d+)?\s+(?=[A-Za-z])/, "")
-    .replace(/\b(?:NF|TX|TAXABLE|T|F)\b$/i, "")
+    // Single-letter flags are left to normalizeItemName, which knows which
+    // letters are safe to remove.
+    .replace(/\b(?:NF|TX|TAXABLE)\b$/i, "")
     .replace(/\s+/g, " ")
     .trim();
   if (pendingName) {
@@ -1974,9 +2355,14 @@ async function runMistralOcr({
     ocrRequest.confidenceScoresGranularity = "word";
   }
 
+  // `timeoutMs` gives the SDK an AbortSignal, so an expired request actually
+  // releases the socket. `withTimeout` alone could not do that — it raced a
+  // promise and walked away, leaving the upload running against Mistral with
+  // nobody waiting for it. The outer race stays as a backstop, set slightly
+  // later so the abort is what normally fires.
   const result = await withTimeout(
-    client.ocr.process(ocrRequest),
-    timeoutMs,
+    client.ocr.process(ocrRequest, { timeoutMs }),
+    timeoutMs + 2000,
     "Mistral OCR"
   );
 
@@ -2100,7 +2486,13 @@ async function parseFullReceiptResponse(buffer, mimeType, reqId, options = {}) {
     normalized = applyFastLocalNormalization(normalized);
 
     const contradictionStart = Date.now();
-    resolutionResult = resolveFinancialContradictions(normalized, reqId);
+    resolutionResult = resolveFinancialContradictions(normalized, reqId, {
+      ocrText,
+      appleOcrText: options.appleOcrText,
+      localHints: options.localHints,
+      localParseResult: options.localParseResult,
+      localCandidates: options.localCandidates,
+    });
     normalized = resolutionResult.receipt;
     timings.contradiction_resolution_ms = Date.now() - contradictionStart;
     resolutionResult.receipt = normalized;
@@ -2457,33 +2849,383 @@ function buildDiscountModeCandidate(normalized, itemMode, orderDiscountMode = "o
   };
 }
 
-function resolveFinancialContradictions(normalized, reqId) {
+function receiptCandidateSignature(receipt) {
+  const summary = [
+    receipt?.merchant || "",
+    receipt?.subtotal ?? "",
+    receipt?.tax ?? "",
+    receipt?.tip ?? "",
+    receipt?.fees ?? "",
+    receipt?.orderLevelDiscount ?? "",
+    receipt?.grandTotal ?? "",
+  ].join("|");
+  const items = (receipt?.items || []).map(receiptItemSignature).join(";");
+  return `${summary}|${items}`;
+}
+
+function itemEvidenceSupport(item, evidenceLines, localItems) {
+  let score = 0;
+  const sources = new Set();
+  for (const evidence of evidenceLines) {
+    if (!evidence.itemLike || !itemMatchesEvidence(item, evidence)) continue;
+    score += evidence.source === "apple" ? 3 : 3;
+    sources.add(evidence.source);
+  }
+  for (const localItem of localItems) {
+    if (moneyToCents(item.amount ?? item.printedAmount) !== localItem.cents) continue;
+    if (tokenOverlapRatio(item.name || item.rawName, localItem.name) < 0.5) continue;
+    score += 2;
+    sources.add(localItem.source);
+  }
+  if (sources.size >= 2) score += 2;
+  return score;
+}
+
+function summaryEvidenceSupport(receipt, evidenceLines) {
+  let score = 0;
+  const addSupport = (field, roles, strongRoles = roles) => {
+    const cents = moneyToCents(receipt?.[field]);
+    if (cents == null) return;
+    const matches = evidenceLines.filter(line => line.cents === cents && roles.includes(line.role));
+    if (!matches.length) return;
+    score += strongRoles.some(role => matches.some(line => line.role === role)) ? 8 : 4;
+  };
+  addSupport("subtotal", ["subtotal"]);
+  addSupport("tax", ["tax"]);
+  addSupport("tip", ["tip"]);
+  addSupport("fees", ["fees"]);
+  addSupport("orderLevelDiscount", ["orderLevelDiscount"]);
+  addSupport("grandTotal", ["grandTotal"]);
+
+  const totalCents = moneyToCents(receipt?.grandTotal);
+  if (totalCents != null) {
+    const netOnly = evidenceLines.some(line => line.cents === totalCents && (line.netSalesLike || line.netTotalLike));
+    const explicitTotal = evidenceLines.some(line => line.cents === totalCents && line.role === "grandTotal" && !line.netSalesLike && !line.netTotalLike);
+    if (explicitTotal) score += 10;
+    if (netOnly && !explicitTotal) score -= 35;
+  }
+  return score;
+}
+
+function duplicateItemPenalty(items) {
+  const seen = new Map();
+  let penalty = 0;
+  for (const item of items || []) {
+    const key = receiptItemSignature(item);
+    seen.set(key, (seen.get(key) || 0) + 1);
+  }
+  for (const count of seen.values()) {
+    if (count > 1) penalty += (count - 1) * 8;
+  }
+  return penalty;
+}
+
+function scoreReceiptCandidate(receipt, evidenceLines, localItems, label) {
+  const reconciliation = reconcileReceipt(receipt);
+  let score = 0;
+  const reasons = [];
+  const itemCount = receipt?.items?.length || 0;
+
+  if (itemCount > 0) {
+    score += 12 + Math.min(itemCount, 20) * 1.5;
+    reasons.push(`items=${itemCount}`);
+  } else {
+    score -= 35;
+    reasons.push("no_items");
+  }
+
+  if (reconciliation.subtotalGap != null) {
+    const cents = moneyToCents(reconciliation.subtotalGap) ?? 99999;
+    if (cents <= 1) {
+      score += 55;
+      reasons.push("item_sum_matches_subtotal");
+    } else {
+      score -= Math.min(55, cents / 20);
+      reasons.push(`subtotal_gap=${centsToMoney(cents)}`);
+    }
+  }
+
+  if (reconciliation.totalGap != null) {
+    const cents = moneyToCents(reconciliation.totalGap) ?? 99999;
+    if (cents <= 1) {
+      score += 65;
+      reasons.push("summary_math_matches_total");
+    } else {
+      score -= Math.min(70, cents / 15);
+      reasons.push(`total_gap=${centsToMoney(cents)}`);
+    }
+  } else if (receipt?.grandTotal == null) {
+    score -= 12;
+    reasons.push("no_grand_total");
+  }
+
+  const supportedItemCount = (receipt?.items || []).reduce((count, item) => {
+    const support = itemEvidenceSupport(item, evidenceLines, localItems);
+    score += Math.min(8, support);
+    return count + (support > 0 ? 1 : 0);
+  }, 0);
+  if (itemCount > 0 && supportedItemCount === 0) {
+    score -= 20;
+    reasons.push("no_item_ocr_support");
+  } else if (supportedItemCount > 0) {
+    reasons.push(`supported_items=${supportedItemCount}`);
+  }
+
+  score += summaryEvidenceSupport(receipt, evidenceLines);
+  const nonItems = (receipt?.items || []).filter(item => isLikelyNonItemRow(item.name)).length;
+  if (nonItems) {
+    score -= nonItems * 20;
+    reasons.push(`non_item_rows=${nonItems}`);
+  }
+  const dupPenalty = duplicateItemPenalty(receipt?.items || []);
+  if (dupPenalty) {
+    score -= dupPenalty;
+    reasons.push(`duplicate_penalty=${dupPenalty}`);
+  }
+
+  if (reconciliation.mathCheckPassed) score += 20;
+  return {
+    label,
+    score: round2(score),
+    receipt,
+    reconciliation,
+    reasons,
+  };
+}
+
+function findReplacementRepair(receipt, gapCents, evidenceLines, localItems) {
+  if (!gapCents) return null;
+  for (const [index, item] of (receipt.items || []).entries()) {
+    const currentCents = moneyToCents(item.amount ?? item.printedAmount);
+    if (currentCents == null) continue;
+    const desiredCents = currentCents + gapCents;
+    if (desiredCents <= 0 || desiredCents === currentCents) continue;
+
+    const ocrEvidence = evidenceLines.find(line =>
+      line.itemLike &&
+      line.cents === desiredCents &&
+      tokenOverlapRatio(item.name || item.rawName, line.name || line.line) >= 0.5
+    );
+    const localEvidence = localItems.find(localItem =>
+      localItem.cents === desiredCents &&
+      tokenOverlapRatio(item.name || item.rawName, localItem.name) >= 0.5
+    );
+    const evidence = ocrEvidence || localEvidence;
+    if (!evidence) continue;
+
+    const repairedItems = receipt.items.map((candidateItem, candidateIndex) => {
+      if (candidateIndex !== index) return candidateItem;
+      const nextAmount = centsToMoney(desiredCents);
+      return {
+        ...candidateItem,
+        printedAmount: nextAmount,
+        amount: nextAmount,
+        sourceText: [candidateItem.sourceText, evidence.line || evidence.source].filter(Boolean).join("\n"),
+      };
+    });
+    return {
+      receipt: { ...receipt, items: repairedItems },
+      change: `Corrected "${item.name}" from $${centsToMoney(currentCents).toFixed(2)} to $${centsToMoney(desiredCents).toFixed(2)} using ${evidence.source || "local"} evidence.`,
+    };
+  }
+  return null;
+}
+
+function findMissingItemRepair(receipt, gapCents, evidenceLines, localItems) {
+  if (!gapCents || gapCents <= 0) return null;
+
+  const ocrEvidence = evidenceLines.find(line =>
+    line.itemLike &&
+    line.cents === gapCents &&
+    !receiptHasEquivalentItem(receipt, line.name, line.amount)
+  );
+  const localEvidence = localItems.find(item =>
+    item.cents === gapCents &&
+    !receiptHasEquivalentItem(receipt, item.name, item.amount)
+  );
+  const evidence = ocrEvidence || localEvidence;
+  if (!evidence) return null;
+
+  const amount = centsToMoney(gapCents);
+  const name = normalizeItemName(evidence.name || "Unknown Item");
+  if (!name || isLikelyNonItemRow(name)) return null;
+
+  return {
+    receipt: {
+      ...receipt,
+      items: [
+        ...(receipt.items || []),
+        {
+          name,
+          rawName: name,
+          normalizedName: applySafeLocalItemNameCleanup(name),
+          normalizationSource: "local",
+          normalizationConfidence: 0.75,
+          normalizationAmbiguous: false,
+          needsNameVerification: false,
+          possibleNameAlternatives: [],
+          normalizationReason: "Added from unused OCR/local evidence during arithmetic repair.",
+          category: inferFallbackItemCategory(name),
+          categoryConfidence: 0.45,
+          categoryReason: "Category inferred locally from repaired item text.",
+          printedAmount: amount,
+          amount,
+          originalAmount: null,
+          itemDiscount: null,
+          itemDiscountLabel: null,
+          discountAmount: null,
+          discountLabel: null,
+          qty: null,
+          unitPrice: null,
+          weightLbs: null,
+          confidence: "medium",
+          sourceText: evidence.line || evidence.source || "local evidence",
+        },
+      ],
+    },
+    change: `Added missing item "${name}" for $${amount.toFixed(2)} using ${evidence.source || "local"} evidence.`,
+  };
+}
+
+function buildTargetedRepairCandidates(receipt, evidenceOptions, evidenceLines, localItems) {
+  const target = merchandiseTargetFromEvidence(receipt, evidenceOptions.localHints);
+  if (!target) return [];
+  const itemSumCents = moneyToCents((receipt.items || []).reduce((sum, item) => sum + (item.amount || 0), 0));
+  if (itemSumCents == null) return [];
+  const gapCents = target.cents - itemSumCents;
+  if (!gapCents || Math.abs(gapCents) <= 1) return [];
+  if (Math.abs(gapCents) > 50000) return [];
+
+  const repairs = [];
+  const replacement = findReplacementRepair(receipt, gapCents, evidenceLines, localItems);
+  if (replacement) repairs.push({ ...replacement, kind: "amount_replacement", targetSource: target.source });
+
+  const missing = findMissingItemRepair(receipt, gapCents, evidenceLines, localItems);
+  if (missing) repairs.push({ ...missing, kind: "missing_item", targetSource: target.source });
+  return repairs;
+}
+
+function arbitrateReceiptCandidates(baseReceipt, evidenceOptions, reqId, baseChanges = [], baseSuspicious = []) {
+  const evidenceLines = extractReceiptMoneyEvidence({
+    ocrText: evidenceOptions?.ocrText || "",
+    appleOcrText: evidenceOptions?.appleOcrText || "",
+  });
+  const localItems = localEvidenceItems(evidenceOptions?.localParseResult, evidenceOptions?.localCandidates);
+  const localSummary = summaryFieldsFromLocalEvidence(evidenceOptions?.localHints, evidenceOptions?.localParseResult);
+  const candidates = [];
+  const seen = new Set();
+
+  const addCandidate = (label, receipt, changes = []) => {
+    if (!receipt) return;
+    const key = receiptCandidateSignature(receipt);
+    if (seen.has(key)) return;
+    seen.add(key);
+    candidates.push({
+      label,
+      receipt,
+      changes,
+      score: scoreReceiptCandidate(receipt, evidenceLines, localItems, label),
+    });
+  };
+
+  addCandidate("mistral_cleaned", baseReceipt, baseChanges);
+
+  const localParsed = buildParsedReceiptFromLocalParse(evidenceOptions?.localParseResult);
+  if (localParsed) {
+    const normalizedLocal = applyFastLocalNormalization(normalizeParsedReceipt(localParsed));
+    const cleanedLocal = cleanReceiptForCandidate(normalizedLocal, reqId);
+    addCandidate("local_parser_hypothesis", cleanedLocal.receipt, cleanedLocal.changes);
+  }
+
+  if (Object.keys(localSummary).length) {
+    addCandidate("mistral_items_local_summary", {
+      ...baseReceipt,
+      ...localSummary,
+      notes: [baseReceipt.notes, "Trusted local summary fields considered by backend arbitration."].filter(Boolean).join(" "),
+    }, ["Combined Mistral items with supported local summary fields."]);
+  }
+
+  if (localParsed) {
+    const localItemsOnly = cleanReceiptForCandidate(applyFastLocalNormalization(normalizeParsedReceipt({
+      ...localParsed,
+      merchant: localParsed.merchant || baseReceipt.merchant,
+      subtotal: baseReceipt.subtotal,
+      tax: baseReceipt.tax,
+      tip: baseReceipt.tip,
+      fees: baseReceipt.fees,
+      orderLevelDiscount: baseReceipt.orderLevelDiscount,
+      grandTotal: baseReceipt.grandTotal,
+      confidence: baseReceipt.confidence,
+    })), reqId);
+    addCandidate("local_items_mistral_summary", localItemsOnly.receipt, localItemsOnly.changes);
+  }
+
+  for (const repair of buildTargetedRepairCandidates(baseReceipt, evidenceOptions || {}, evidenceLines, localItems)) {
+    addCandidate(`repaired_${repair.kind}`, {
+      ...repair.receipt,
+      notes: [repair.receipt.notes, repair.change].filter(Boolean).join(" "),
+    }, [repair.change]);
+  }
+
+  if (!candidates.length) {
+    return {
+      receipt: baseReceipt,
+      selectedCandidate: "mistral_cleaned",
+      candidatesTried: 1,
+      suspicious: baseSuspicious,
+      changes: baseChanges,
+      allCandidates: [],
+    };
+  }
+
+  candidates.sort((a, b) => b.score.score - a.score.score);
+  const selected = candidates[0];
+  const selectedReconciliation = selected.score.reconciliation;
+  if (RECEIPT_ARBITRATION_DEBUG && reqId) {
+    console.log(`[${reqId}] Receipt arbitration candidates:`);
+    for (const candidate of candidates) {
+      console.log(`[${reqId}]   - ${candidate.label}: score=${candidate.score.score} math=${candidate.score.reconciliation.mathCheckPassed ? "pass" : "fail"} reasons=${candidate.score.reasons.join(",")}`);
+    }
+    console.log(`[${reqId}] Receipt arbitration selected: ${selected.label}`);
+  }
+
+  return {
+    receipt: selected.receipt,
+    selectedCandidate: selected.label,
+    candidatesTried: candidates.length,
+    suspicious: baseSuspicious,
+    changes: selected.changes,
+    selectedScore: selected.score.score,
+    selectedReasons: selected.score.reasons,
+    allCandidates: candidates.map(candidate => ({
+      label: candidate.label,
+      receipt: candidate.receipt,
+      reconciliation: candidate.score.reconciliation,
+      score: candidate.score.score,
+      reasons: candidate.score.reasons,
+    })),
+    finalReconciliation: selectedReconciliation,
+  };
+}
+
+function resolveFinancialContradictions(normalized, reqId, evidenceOptions = {}) {
   console.log(`[${reqId}] Starting simple receipt cleanup...`);
 
-  const stripped = stripNonItemRows(normalized.items, reqId);
-  const items = stripped.kept.map(item => {
-    const discount = item.discountAmount ?? 0;
-    return {
-      ...item,
-      amount: round2(item.printedAmount),
-      originalAmount: discount > 0 ? round2(item.printedAmount + discount) : null,
-      itemDiscount: discount > 0 ? round2(discount) : null,
-      itemDiscountLabel: discount > 0 ? item.discountLabel || null : null,
-    };
-  });
-
-  let receipt = {
-    ...normalized,
-    items,
-  };
-  const suggestedTipSuppression = suppressUnchargedSuggestedTip(receipt, reqId);
-  receipt = suggestedTipSuppression.receipt;
-
+  const cleaned = cleanReceiptForCandidate(normalized, reqId);
+  let receipt = cleaned.receipt;
   const changes = [
-    ...stripped.dropped.map(item => `Removed non-item row: "${item.name}"`),
-    suggestedTipSuppression.reason,
+    ...cleaned.changes,
     "Preserved Mistral final item amounts without discount-mode rewriting.",
   ].filter(Boolean);
+
+  let arbitration = null;
+  if (
+    evidenceOptions &&
+    (evidenceOptions.ocrText || evidenceOptions.appleOcrText || evidenceOptions.localParseResult || evidenceOptions.localHints || evidenceOptions.localCandidates)
+  ) {
+    arbitration = arbitrateReceiptCandidates(receipt, evidenceOptions, reqId, changes, cleaned.suspicious);
+    receipt = arbitration.receipt;
+  }
 
   const reconciliation = reconcileReceipt(receipt);
   if (!reconciliation.mathCheckPassed && reconciliation.mismatchReasons.length > 0) {
@@ -2493,15 +3235,17 @@ function resolveFinancialContradictions(normalized, reqId) {
     ].filter(Boolean).join(" ");
   }
 
-  console.log(`[${reqId}] Simple cleanup kept ${items.length} item(s); math=${reconciliation.mathCheckPassed ? "✓" : "✗"}`);
+  console.log(`[${reqId}] Simple cleanup kept ${receipt.items?.length || 0} item(s); math=${reconciliation.mathCheckPassed ? "✓" : "✗"}`);
 
   return {
     receipt,
-    selectedCandidate: "simple_final_amounts",
-    candidatesTried: 1,
-    suspicious: stripped.dropped.map((item, index) => ({ index, item, flags: ["non_item_row"] })),
-    changes,
-    allCandidates: [{
+    selectedCandidate: arbitration?.selectedCandidate || "simple_final_amounts",
+    candidatesTried: arbitration?.candidatesTried || 1,
+    suspicious: arbitration?.suspicious || cleaned.suspicious,
+    changes: arbitration?.changes || changes,
+    selectedScore: arbitration?.selectedScore,
+    selectedReasons: arbitration?.selectedReasons || [],
+    allCandidates: arbitration?.allCandidates || [{
       label: "simple_final_amounts",
       receipt,
       reconciliation,
@@ -2842,7 +3586,18 @@ function buildApiResponse(parseResult, timings, reqId) {
         })),
         candidates_tried: resolutionResult?.candidatesTried || 0,
         selected_candidate: resolutionResult?.selectedCandidate || "not_run",
+        selected_score: resolutionResult?.selectedScore ?? null,
+        selected_reasons: resolutionResult?.selectedReasons || [],
         changes_applied: resolutionResult?.changes || [],
+        candidates: (resolutionResult?.allCandidates || []).map(candidate => ({
+          label: candidate.label,
+          score: candidate.score ?? null,
+          math_check_passed: Boolean(candidate.reconciliation?.mathCheckPassed),
+          subtotal_gap: candidate.reconciliation?.subtotalGap ?? null,
+          total_gap: candidate.reconciliation?.totalGap ?? null,
+          item_count: candidate.receipt?.items?.length ?? 0,
+          reasons: candidate.reasons || [],
+        })),
       },
       arithmetic_breakdown: {
         items_detail: reconciliation.itemBreakdown,
@@ -3119,7 +3874,16 @@ app.post("/parse-receipt", requireAppAuth, async (req, res) => {
   console.log("=".repeat(80));
 
   try {
-    const { imageBase64, mimeType = "image/jpeg", sourceType = "unknown", mode = "unknown" } = req.body || {};
+    const {
+      imageBase64,
+      mimeType = "image/jpeg",
+      sourceType = "unknown",
+      mode = "unknown",
+      appleOcrText = "",
+      localHints = null,
+      localParseResult = null,
+      localCandidates = null,
+    } = req.body || {};
 
     trackAnalyticsEvent({
       ...analyticsContext,
@@ -3251,7 +4015,12 @@ app.post("/parse-receipt", requireAppAuth, async (req, res) => {
       event_name: "receipt_ocr_started",
       properties: { request_id: reqId, ocr_provider: "mistral", file_type: safeMimeType, mode },
     });
-    let { parsed, ocrText, result } = await callMistralOCR(buffer, safeMimeType, reqId);
+    let { parsed, ocrText, result } = await callMistralOCR(buffer, safeMimeType, reqId, {
+      appleOcrText,
+      localHints,
+      localParseResult,
+      localCandidates,
+    });
     const candidateSelection = selectMistralReceiptCandidate(parsed, ocrText, reqId);
     timings.ocr_ms = Date.now() - ocrStart;
     trackAnalyticsEvent({
@@ -3336,7 +4105,13 @@ app.post("/parse-receipt", requireAppAuth, async (req, res) => {
       normalized = applyFastLocalNormalization(normalized);
 
       const contradictionStart = Date.now();
-      resolutionResult = resolveFinancialContradictions(normalized, reqId);
+      resolutionResult = resolveFinancialContradictions(normalized, reqId, {
+        ocrText,
+        appleOcrText,
+        localHints,
+        localParseResult,
+        localCandidates,
+      });
       normalized = resolutionResult.receipt;
       timings.contradiction_resolution_ms = Date.now() - contradictionStart;
       resolutionResult.receipt = normalized;
@@ -4059,7 +4834,11 @@ if (process.env.NODE_ENV !== "test") {
 
 export {
   app,
+  arbitrateReceiptCandidates,
   buildReceiptFromMistralOcrText,
+  compactAppleOcrText,
+  compactLocalParseResult,
+  extractReceiptMoneyEvidence,
   extractFallbackBankTransactionsFromOcrText,
   hashIdentifier,
   isLikelyNonItemRow,
