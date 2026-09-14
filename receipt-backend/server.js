@@ -126,11 +126,69 @@ const ItemCategoryEnum = z.enum([
   "other",
 ]);
 
+const DiscountApplicationEnum = z.enum([
+  "none",
+  "already_reflected",
+  "separate_deduction",
+  "informational",
+]);
+
+const AdditionalFeeTypeEnum = z.enum([
+  "sales_tax",
+  "state_tax",
+  "local_tax",
+  "city_tax",
+  "county_tax",
+  "district_tax",
+  "vat",
+  "gst",
+  "hst",
+  "pst",
+  "qst",
+  "occupancy_tax",
+  "tourism_tax",
+  "alcohol_tax",
+  "other_tax",
+  "tip",
+  "gratuity",
+  "automatic_gratuity",
+  "service_charge",
+  "delivery_fee",
+  "convenience_fee",
+  "processing_fee",
+  "platform_fee",
+  "booking_fee",
+  "facility_fee",
+  "resort_fee",
+  "fuel_surcharge",
+  "surcharge",
+  "bag_fee",
+  "bottle_deposit",
+  "recycling_fee",
+  "environmental_fee",
+  "regulatory_fee",
+  "other",
+]);
+
 const ReceiptItemSchema = z.object({
-  name: z.string().describe("Visible purchased item name. Keep it short and literal."),
-  printedAmount: z.number().describe("The final item value to split. If a visible item discount is already applied, this must be the after-discount value."),
-  discountAmount: z.number().nullable().optional().describe("Optional positive visible item discount magnitude. Metadata only; never subtract it again."),
-  discountLabel: z.string().nullable().optional().describe("Optional visible discount label tied to this item."),
+  itemName: z.string().describe("Visible purchased item name. Keep it short and literal."),
+  itemValue: z.number().describe("Final effective value for bill splitting after any separate item deduction. Never include tax, tip, or fees."),
+  originalItemValue: z.number().nullable().optional().describe("Original item value before a separate item-level deduction, only when visibly supported."),
+  discountApplied: z.boolean().optional().describe("True when a visible item-level discount or promotion applies to this item."),
+  discountAmount: z.number().nullable().optional().describe("Positive visible item discount magnitude. Metadata only; downstream must never subtract it again."),
+  discountLabel: z.string().nullable().optional().describe("Visible discount label tied to this item."),
+  discountApplication: DiscountApplicationEnum.optional().describe("How the discount affects itemValue: none, already_reflected, separate_deduction, or informational."),
+  name: z.string().nullable().optional().describe("Legacy alias for itemName."),
+  printedAmount: z.number().nullable().optional().describe("Legacy alias for itemValue."),
+});
+
+const AdditionalFeeSchema = z.object({
+  feeLabel: z.string().describe("Visible printed label for this distinct non-item positive charge."),
+  feeType: AdditionalFeeTypeEnum.describe("Specific type of this charge."),
+  amount: z.number().describe("Actual charged monetary amount. Must be positive."),
+  rate: z.number().nullable().optional().describe("Visible percentage/rate, e.g. 8.875 for 8.875%; null if none is printed."),
+  isTax: z.boolean().describe("True for tax/VAT/GST/HST/PST/QST entries."),
+  isTipOrGratuity: z.boolean().describe("True for actual charged tip/gratuity entries."),
 });
 
 const MistralReceiptSchema = z.object({
@@ -139,11 +197,16 @@ const MistralReceiptSchema = z.object({
   currency: z.string().nullable().optional().describe("Currency code (USD, CAD, EUR, etc.)"),
   items: z.array(ReceiptItemSchema).describe("Purchased items, transcribed exactly as printed"),
   subtotal: z.number().nullable().optional().describe("Subtotal if explicitly shown"),
-  tax: z.number().nullable().optional().describe("Sales tax amount"),
-  tip: z.number().nullable().optional().describe("Tip/gratuity amount"),
-  fees: z.number().nullable().optional().describe("Service fees, delivery fees, bag fees, etc."),
+  tax: z.number().nullable().optional().describe("Legacy total of tax entries derived from additionalFees"),
+  tip: z.number().nullable().optional().describe("Legacy total of actual charged tip/gratuity entries derived from additionalFees"),
+  fees: z.number().nullable().optional().describe("Legacy total of non-tax, non-tip additionalFees"),
+  additionalFees: z.array(AdditionalFeeSchema).optional().describe("Every distinct printed positive non-item charge that contributes to the final amount. Never combine separate tax/fee/tip lines."),
+  additionalFeesTotal: z.number().nullable().optional().describe("Sum of additionalFees.amount"),
+  itemDiscountTotal: z.number().nullable().optional().describe("Sum of item-level discount amounts when shown"),
+  discount: z.number().nullable().optional().describe("Reported receipt savings when shown; informational unless it is an order-wide deduction"),
   orderLevelDiscount: z.number().nullable().optional().describe("Order-wide discount not already reflected in item printedAmount values"),
   grandTotal: z.number().nullable().optional().describe("Final total (BALANCE DUE, GRAND TOTAL, etc.)"),
+  total: z.number().nullable().optional().describe("Legacy alias for grandTotal"),
   confidence: ConfidenceEnum.nullable().optional().describe("OCR clarity confidence, not math confidence"),
   notes: z.string().nullable().optional().describe("Parsing notes or warnings"),
 });
@@ -1136,37 +1199,47 @@ function reconcileBankDocument(bankDocument) {
 const EXTRACTION_PROMPT = `Read this receipt like a careful bill-splitting scanner.
 
 Goal:
-Return the merchant name, final charged/owed total, actual purchased item rows, and visible receipt-level adjustments. Use the receipt image as primary evidence. OCR text and local parser data are independent evidence that may help resolve ambiguity, but they may also contain recognition or grouping errors.
+Return the merchant name, every purchased item, item-level discounts, receipt/order discounts, every positive non-item charge, and the final charged/owed total. Use the receipt image as the evidence.
 
 Core evidence rules:
 1. Never invent missing products, prices, tax, fees, tips, discounts, quantities, dates, or totals.
 2. Use null for genuinely uncertain summary fields. A partial supported result is better than fabricated completeness.
-3. Do not omit an item merely because one OCR source is uncertain when the image or another OCR source clearly supports it.
+3. Do not omit an item when the image clearly supports it.
 4. When two plausible readings of an amount exist, prefer the interpretation that is both visually supported and mathematically consistent with the receipt.
 5. Math may resolve ambiguity, but math must not override a visually impossible reading.
 
 Purchased item rules:
 - An item row is merchandise or service the customer actually purchased.
-- name is the visible item name, short and literal.
-- printedAmount is the final merchandise/service value for that item row. Do not allocate tax, fees, or tip into item prices.
-- If an item-level discount is visibly applied and the printed item value already reflects it, printedAmount is that after-discount value.
-- discountAmount and discountLabel are display metadata only. They must never cause printedAmount to be subtracted again.
+- itemName is the visible item name, short and literal.
+- itemValue is the final effective value for bill splitting. Do not allocate tax, fees, or tip into item prices.
+- If a separate deduction belongs to an item, itemValue is originalItemValue minus discountAmount and discountApplication is separate_deduction.
+- If a promotional price is already reflected in the printed item value, itemValue is that printed value and discountApplication is already_reflected.
+- If savings are informational only, discountApplication is informational and the savings must not reduce itemValue.
+- discountAmount and discountLabel are display metadata. They must never cause itemValue to be subtracted again.
 - Keep duplicate purchases as separate items only when they are actual separate purchased rows.
 
 Never output these as purchased items:
-SUBTOTAL, TAX, SALES TAX, TOTAL, BALANCE, AMOUNT DUE, NET SALES, NET TOTAL, CHANGE, CASH, CREDIT, DEBIT, VISA, MASTERCARD, AMEX, suggested gratuity rows, tip suggestions, loyalty points, rewards, savings summaries, payment methods, transaction IDs, authorization codes, and discount-only rows.
+SUBTOTAL, TAX, SALES TAX, TOTAL, BALANCE, AMOUNT DUE, NET SALES, NET TOTAL, CHANGE, CASH, CREDIT, DEBIT, VISA, MASTERCARD, AMEX, tips, gratuities, service charges, fees, suggested gratuity rows, tip suggestions, loyalty points, rewards, savings summaries, payment methods, transaction IDs, authorization codes, and discount-only rows.
+
+Additional charge rules:
+- Put every actual positive non-item charge in additionalFees as a separate entry.
+- Preserve separate printed charges separately. STATE TAX 2.10 and CITY TAX 0.75 are two entries, not one tax of 2.85.
+- Include actual charged sales/state/local/city/county/district taxes, VAT/GST/HST/PST/QST, occupancy/tourism/hotel/alcohol taxes, tips, gratuity, automatic gratuity, service/delivery/convenience/processing/platform/booking/facility/resort fees, surcharges, bag fees, deposits, recycling/environmental/regulatory fees, and other positive fees.
+- Only include amounts actually charged. Do not include suggested tip choices, blank tip lines, selectable 15%/18%/20% rows, tax rates without charged amounts, subtotal, total, discounts, coupons, savings, cash tendered, card payments, change, or authorization holds.
+- If both a rate and charged amount are printed, put the percentage in rate and the monetary charge in amount.
+- Derive tax, tip, fees, and additionalFeesTotal from additionalFees for compatibility.
 
 Summary field rules:
 - subtotal is merchandise/service amount before tax, tip, and external fees, after discounts when the receipt defines it that way.
-- tax is only visible actual tax. Do not infer tax because receipts often have tax.
-- fees are only visible charged fees such as service, delivery, bag, card surcharge, convenience, pickup, or processing fees.
-- tip is only an actually charged gratuity/tip. Never use suggested tip tables or suggested dollar amounts.
+- tax is the total of actual tax entries in additionalFees. Do not infer tax because receipts often have tax.
+- fees is the total of non-tax, non-tip entries in additionalFees.
+- tip is the total of actual charged tip/gratuity entries in additionalFees. Never use suggested tip tables or suggested dollar amounts.
 - orderLevelDiscount is a visible order-wide discount/coupon not already reflected in item printedAmount values.
 - grandTotal is the final charged or owed transaction amount. Strong labels include TOTAL, GRAND TOTAL, AMOUNT DUE, BALANCE DUE, and ORDER TOTAL. Payment amount context can support it.
 - Do not treat NET SALES as grandTotal. NET SALES normally behaves like pre-tax subtotal. Be very cautious with NET TOTAL unless final payment/due context proves it is the charged total.
 
 Internal math check:
-Compute itemSum = sum(final item printedAmount values). Compare itemSum with subtotal when subtotal is visible. Compare itemSum + tax + tip + fees - orderLevelDiscount with grandTotal. Do not expose this reasoning. Return structured JSON only.
+Compute itemSum = sum(itemValue). Compare itemSum with subtotal when subtotal is visible. Compare itemSum + additionalFeesTotal - orderLevelDiscount with grandTotal. Do not expose this reasoning. Return structured JSON only.
 
 Return JSON only.`;
 
@@ -1678,6 +1751,212 @@ function amountMagnitude(value) {
   return round2(Math.abs(Number(value || 0)));
 }
 
+const ADDITIONAL_FEE_TYPE_VALUES = new Set([
+  "sales_tax",
+  "state_tax",
+  "local_tax",
+  "city_tax",
+  "county_tax",
+  "district_tax",
+  "vat",
+  "gst",
+  "hst",
+  "pst",
+  "qst",
+  "occupancy_tax",
+  "tourism_tax",
+  "alcohol_tax",
+  "other_tax",
+  "tip",
+  "gratuity",
+  "automatic_gratuity",
+  "service_charge",
+  "delivery_fee",
+  "convenience_fee",
+  "processing_fee",
+  "platform_fee",
+  "booking_fee",
+  "facility_fee",
+  "resort_fee",
+  "fuel_surcharge",
+  "surcharge",
+  "bag_fee",
+  "bottle_deposit",
+  "recycling_fee",
+  "environmental_fee",
+  "regulatory_fee",
+  "other",
+]);
+
+function isTaxFeeType(feeType) {
+  return [
+    "sales_tax",
+    "state_tax",
+    "local_tax",
+    "city_tax",
+    "county_tax",
+    "district_tax",
+    "vat",
+    "gst",
+    "hst",
+    "pst",
+    "qst",
+    "occupancy_tax",
+    "tourism_tax",
+    "alcohol_tax",
+    "other_tax",
+  ].includes(feeType);
+}
+
+function isTipOrGratuityFeeType(feeType) {
+  return ["tip", "gratuity", "automatic_gratuity"].includes(feeType);
+}
+
+function inferAdditionalFeeType(label, role = null, explicitType = null) {
+  const type = String(explicitType || "").trim().toLowerCase();
+  if (ADDITIONAL_FEE_TYPE_VALUES.has(type)) return type;
+
+  const lower = cleanOcrLine(label).toLowerCase();
+  if (/\bvat\b/.test(lower)) return "vat";
+  if (/\bgst\b/.test(lower)) return "gst";
+  if (/\bhst\b/.test(lower)) return "hst";
+  if (/\bpst\b/.test(lower)) return "pst";
+  if (/\bqst\b/.test(lower)) return "qst";
+  if (/\boccupancy|hotel|room\s+tax\b/.test(lower)) return "occupancy_tax";
+  if (/\btourism|tourist\b/.test(lower)) return "tourism_tax";
+  if (/\balcohol|liquor\b/.test(lower) && /\btax\b/.test(lower)) return "alcohol_tax";
+  if (/\bstate\b.*\btax\b|\btax\b.*\bstate\b/.test(lower)) return "state_tax";
+  if (/\bcity\b.*\btax\b|\btax\b.*\bcity\b/.test(lower)) return "city_tax";
+  if (/\bcounty\b.*\btax\b|\btax\b.*\bcounty\b/.test(lower)) return "county_tax";
+  if (/\bdistrict\b.*\btax\b|\btax\b.*\bdistrict\b/.test(lower)) return "district_tax";
+  if (/\blocal\b.*\btax\b|\btax\b.*\blocal\b/.test(lower)) return "local_tax";
+  if (/\bsales?\b.*\btax\b|\btax\b/.test(lower) || role === "tax") return lower.includes("sales") ? "sales_tax" : "other_tax";
+  if (/\bautomatic\b.*\bgratuity\b|\bauto\b.*\bgrat\b/.test(lower)) return "automatic_gratuity";
+  if (/\bgratuity|grat\b/.test(lower)) return "gratuity";
+  if (/\btip\b/.test(lower) || role === "tip") return "tip";
+  if (/\bservice\b.*\b(?:charge|fee)?\b/.test(lower)) return "service_charge";
+  if (/\bdelivery\b/.test(lower)) return "delivery_fee";
+  if (/\bconvenience\b/.test(lower)) return "convenience_fee";
+  if (/\bprocessing\b/.test(lower)) return "processing_fee";
+  if (/\bplatform\b/.test(lower)) return "platform_fee";
+  if (/\bbooking\b/.test(lower)) return "booking_fee";
+  if (/\bfacility\b/.test(lower)) return "facility_fee";
+  if (/\bresort\b/.test(lower)) return "resort_fee";
+  if (/\bfuel\b.*\bsurcharge\b/.test(lower)) return "fuel_surcharge";
+  if (/\bbag\b/.test(lower)) return "bag_fee";
+  if (/\bbottle\b.*\bdeposit\b/.test(lower)) return "bottle_deposit";
+  if (/\brecycl/.test(lower)) return "recycling_fee";
+  if (/\benvironment/.test(lower)) return "environmental_fee";
+  if (/\bregulatory|regulation\b/.test(lower)) return "regulatory_fee";
+  if (/\bsurcharge\b/.test(lower)) return "surcharge";
+  if (role === "fees") return "other";
+  return "other";
+}
+
+function extractRateFromLine(line) {
+  const match = cleanOcrLine(line).match(/(?<![\d.])(\d{1,2}(?:\.\d{1,4})?)\s*%(?!\d)/);
+  return match ? toNumber(match[1]) : null;
+}
+
+function additionalFeeLabelFromLine(line, amount) {
+  return removeAmountText(line, amount)
+    .replace(/(?<![\d.])\d{1,2}(?:\.\d{1,4})?\s*%(?!\d)/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isExcludedAdditionalFeeLabel(label) {
+  const lower = cleanOcrLine(label).toLowerCase();
+  if (!lower) return true;
+  if (isLikelySuggestedTipRowText(lower)) return true;
+  if (/\b(?:suggested|suggestion|optional|select|choose)\b.*\b(?:tip|gratuity)\b/.test(lower)) return true;
+  if (/^\s*(?:[1-4]?\d|50)\s*%/.test(lower)) return true;
+  const role = summaryRoleForLabel(lower);
+  return ["subtotal", "grandTotal", "orderLevelDiscount", "payment"].includes(role);
+}
+
+function normalizeAdditionalFeeEntry(raw, fallbackRole = null) {
+  if (!raw || typeof raw !== "object") return null;
+  const label = cleanOcrLine(raw.feeLabel ?? raw.label ?? raw.name ?? "");
+  const amount = toNumber(raw.amount ?? raw.value);
+  if (amount == null || amount <= 0) return null;
+  if (isExcludedAdditionalFeeLabel(label)) return null;
+
+  const feeType = inferAdditionalFeeType(label, fallbackRole, raw.feeType ?? raw.kind);
+  const isTax = raw.isTax != null ? Boolean(raw.isTax) : isTaxFeeType(feeType);
+  const isTipOrGratuity = raw.isTipOrGratuity != null
+    ? Boolean(raw.isTipOrGratuity)
+    : isTipOrGratuityFeeType(feeType);
+
+  return {
+    feeLabel: label || (isTax ? "Tax" : isTipOrGratuity ? "Tip" : "Fee"),
+    feeType,
+    amount: round2(amount),
+    rate: toNumber(raw.rate),
+    isTax,
+    isTipOrGratuity,
+  };
+}
+
+function dedupeAdditionalFees(fees) {
+  return (fees || []).filter(Boolean);
+}
+
+function normalizeAdditionalFees(fees) {
+  if (!Array.isArray(fees)) return [];
+  return dedupeAdditionalFees(fees.map(fee => normalizeAdditionalFeeEntry(fee)).filter(Boolean));
+}
+
+function legacyAdditionalFeesFromScalars(parsed) {
+  const result = [];
+  const tax = toNumber(parsed?.tax);
+  const tip = toNumber(parsed?.tip);
+  const fees = toNumber(parsed?.fees);
+  if (tax != null && tax > 0) {
+    result.push(normalizeAdditionalFeeEntry({ feeLabel: "Tax", feeType: "other_tax", amount: tax, isTax: true, isTipOrGratuity: false }, "tax"));
+  }
+  if (tip != null && tip > 0) {
+    result.push(normalizeAdditionalFeeEntry({ feeLabel: "Tip", feeType: "tip", amount: tip, isTax: false, isTipOrGratuity: true }, "tip"));
+  }
+  if (fees != null && fees > 0) {
+    result.push(normalizeAdditionalFeeEntry({ feeLabel: "Fee", feeType: "other", amount: fees, isTax: false, isTipOrGratuity: false }, "fees"));
+  }
+  return dedupeAdditionalFees(result);
+}
+
+function summarizeAdditionalFees(additionalFees) {
+  return (additionalFees || []).reduce((summary, fee) => {
+    if (!fee?.amount) return summary;
+    if (fee.isTax || isTaxFeeType(fee.feeType)) {
+      summary.tax = round2((summary.tax || 0) + fee.amount);
+    } else if (fee.isTipOrGratuity || isTipOrGratuityFeeType(fee.feeType)) {
+      summary.tip = round2((summary.tip || 0) + fee.amount);
+    } else {
+      summary.fees = round2((summary.fees || 0) + fee.amount);
+    }
+    summary.additionalFeesTotal = round2((summary.additionalFeesTotal || 0) + fee.amount);
+    return summary;
+  }, { tax: null, tip: null, fees: null, additionalFeesTotal: null });
+}
+
+function pushAdditionalFeeFromSummaryLine(summary, role, line, amount) {
+  if (!["tax", "tip", "fees"].includes(role) || !amount) return;
+  const value = amountMagnitude(amount.value);
+  if (!(value > 0)) return;
+  const fee = normalizeAdditionalFeeEntry({
+    feeLabel: additionalFeeLabelFromLine(line, amount),
+    feeType: inferAdditionalFeeType(line, role),
+    amount: value,
+    rate: extractRateFromLine(line),
+  }, role);
+  if (!fee) return;
+  summary.additionalFees = dedupeAdditionalFees([...(summary.additionalFees || []), fee]);
+}
+
+function removeTipAdditionalFees(additionalFees) {
+  return (additionalFees || []).filter(fee => !(fee.isTipOrGratuity || isTipOrGratuityFeeType(fee.feeType)));
+}
+
 function moneyToCents(value) {
   if (value == null || Number.isNaN(Number(value))) return null;
   return Math.round(Number(value) * 100);
@@ -1854,13 +2133,18 @@ function cleanReceiptForCandidate(normalized, reqId) {
   const items = stripped.kept.map(item => {
     const printedAmount = round2(item.printedAmount ?? item.amount);
     const discount = item.discountAmount ?? item.itemDiscount ?? 0;
+    const discountApplication = item.discountApplication || (discount > 0 ? "already_reflected" : "none");
+    const originalAmount = item.originalAmount != null
+      ? round2(item.originalAmount)
+      : (discount > 0 && discountApplication !== "informational" ? round2(printedAmount + discount) : null);
     return {
       ...item,
       printedAmount,
       amount: round2(printedAmount),
-      originalAmount: discount > 0 ? round2(printedAmount + discount) : item.originalAmount ?? null,
+      originalAmount,
       itemDiscount: discount > 0 ? round2(discount) : item.itemDiscount ?? null,
       itemDiscountLabel: discount > 0 ? item.discountLabel || item.itemDiscountLabel || null : item.itemDiscountLabel ?? null,
+      discountApplication,
     };
   });
   const withItems = { ...normalized, items };
@@ -2117,9 +2401,18 @@ function updateSummaryFromLine(summary, line, amount) {
   if (!role || !amount) return;
   const value = amountMagnitude(amount.value);
   if (role === "subtotal") summary.subtotal = value;
-  if (role === "tax") summary.tax = round2((summary.tax || 0) + value);
-  if (role === "tip") summary.tip = value;
-  if (role === "fees") summary.fees = round2((summary.fees || 0) + value);
+  if (role === "tax") {
+    summary.tax = round2((summary.tax || 0) + value);
+    pushAdditionalFeeFromSummaryLine(summary, role, line, amount);
+  }
+  if (role === "tip") {
+    summary.tip = round2((summary.tip || 0) + value);
+    pushAdditionalFeeFromSummaryLine(summary, role, line, amount);
+  }
+  if (role === "fees") {
+    summary.fees = round2((summary.fees || 0) + value);
+    pushAdditionalFeeFromSummaryLine(summary, role, line, amount);
+  }
   if (role === "orderLevelDiscount") summary.orderLevelDiscount = round2((summary.orderLevelDiscount || 0) + value);
   if (role === "grandTotal") {
     const lower = cleanOcrLine(line).toLowerCase();
@@ -2162,6 +2455,8 @@ function buildReceiptFromMistralOcrText(ocrText, reqId = "ocr_text_fallback") {
     tax: null,
     tip: null,
     fees: null,
+    additionalFees: [],
+    additionalFeesTotal: null,
     orderLevelDiscount: null,
     grandTotal: null,
     grandTotalPriority: 0,
@@ -2253,15 +2548,19 @@ function buildReceiptFromMistralOcrText(ocrText, reqId = "ocr_text_fallback") {
   if (!uniqueItems.length && summary.grandTotal == null && summary.subtotal == null) return null;
   const amountLineCount = lines.filter(line => lastAmountNearLineEnd(line)).length;
   const confidence = amountLineCount >= Math.max(3, uniqueItems.length) && uniqueItems.length >= 2 ? "medium" : "low";
+  const additionalFees = dedupeAdditionalFees(summary.additionalFees || []);
+  const additionalFeeSummary = summarizeAdditionalFees(additionalFees);
   const receipt = {
     merchant,
     receiptDate: null,
     currency: "USD",
     items: uniqueItems,
     subtotal: summary.subtotal,
-    tax: summary.tax,
-    tip: summary.tip,
-    fees: summary.fees,
+    tax: additionalFeeSummary.tax ?? summary.tax,
+    tip: additionalFeeSummary.tip ?? summary.tip,
+    fees: additionalFeeSummary.fees ?? summary.fees,
+    additionalFees,
+    additionalFeesTotal: additionalFeeSummary.additionalFeesTotal,
     orderLevelDiscount: summary.orderLevelDiscount,
     grandTotal: summary.grandTotal,
     confidence,
@@ -2281,7 +2580,7 @@ function receiptItemsReconcile(receipt, tolerance = 0.02) {
   const items = Array.isArray(receipt.items) ? receipt.items : [];
   if (!items.length) return false;
 
-  const itemSum = round2(items.reduce((sum, item) => sum + (item.printedAmount ?? item.amount ?? 0), 0));
+  const itemSum = round2(items.reduce((sum, item) => sum + (item.printedAmount ?? item.amount ?? item.itemValue ?? 0), 0));
   if (receipt.subtotal != null && Math.abs(itemSum - receipt.subtotal) <= tolerance) return true;
   if (receipt.grandTotal != null) {
     const derived = round2(
@@ -2368,6 +2667,7 @@ async function runMistralOcr({
     timeoutMs + 2000,
     "Mistral OCR"
   );
+  console.log(`[${reqId}] Mistral OCR model requested=${MISTRAL_OCR_MODEL} returned=${result?.model || "unknown"}`);
 
   const pages = result.pages || [];
   const ocrText = pages.map(page => page.markdown || "").join("\n\n");
@@ -2392,12 +2692,7 @@ async function callMistralOCR(imageBuffer, mimeType, reqId, options = {}) {
     mimeType,
     reqId,
     documentAnnotationFormat: responseFormatFromZodObject(MistralReceiptSchema),
-    documentAnnotationPrompt: buildReceiptPromptWithLocalHints(
-      options.localHints,
-      options.appleOcrText,
-      options.localParseResult,
-      options.localCandidates
-    ),
+    documentAnnotationPrompt: EXTRACTION_PROMPT,
   });
 
   let parsed = null;
@@ -2451,7 +2746,9 @@ async function parseFullReceiptResponse(buffer, mimeType, reqId, options = {}) {
     decode_ms: 0,
     temp_file_write_ms: 0,
     ocr_ms: 0,
+    mistral_ocr_ms: 0,
     deterministic_cleanup_ms: 0,
+    mistral_mapping_ms: 0,
     contradiction_resolution_ms: 0,
     reconciliation_ms: 0,
     total_ms: 0,
@@ -2462,6 +2759,7 @@ async function parseFullReceiptResponse(buffer, mimeType, reqId, options = {}) {
   const candidateSelection = selectMistralReceiptCandidate(parsed, ocrText, reqId);
   parsed = candidateSelection.parsed;
   timings.ocr_ms = Date.now() - ocrStart;
+  timings.mistral_ocr_ms = timings.ocr_ms;
 
   let normalized = null;
   let resolutionResult = {
@@ -2485,16 +2783,13 @@ async function parseFullReceiptResponse(buffer, mimeType, reqId, options = {}) {
           : null,
     ].filter(Boolean).join(" ") || normalized.notes;
     timings.deterministic_cleanup_ms = Date.now() - deterministicCleanupStart;
+    timings.mistral_mapping_ms = timings.deterministic_cleanup_ms;
     resolutionResult.receipt = normalized;
     normalized = applyFastLocalNormalization(normalized);
 
     const contradictionStart = Date.now();
     resolutionResult = resolveFinancialContradictions(normalized, reqId, {
       ocrText,
-      appleOcrText: options.appleOcrText,
-      localHints: options.localHints,
-      localParseResult: options.localParseResult,
-      localCandidates: options.localCandidates,
     });
     normalized = resolutionResult.receipt;
     timings.contradiction_resolution_ms = Date.now() - contradictionStart;
@@ -2528,31 +2823,52 @@ async function parseFullReceiptResponse(buffer, mimeType, reqId, options = {}) {
 
 function normalizeParsedReceipt(parsed) {
   if (!parsed) return null;
+  const normalizedAdditionalFees = normalizeAdditionalFees(parsed.additionalFees);
+  const additionalFees = normalizedAdditionalFees.length
+    ? normalizedAdditionalFees
+    : legacyAdditionalFeesFromScalars(parsed);
+  const additionalFeeSummary = summarizeAdditionalFees(additionalFees);
 
   return {
     merchant: normalizeMerchant(parsed.merchant),
     receiptDate: parsed.receiptDate || null,
     currency: parsed.currency || "USD",
     items: (parsed.items || [])
-      .map(item => ({
-        name: normalizeItemName(item.name),
-        printedAmount: round2(item.printedAmount),
-        discountAmount: toNumber(item.discountAmount),
-        discountLabel: item.discountLabel ?? null,
-        sourceText: item.sourceText ?? null,
-        itemCode: item.itemCode ?? null,
-        qty: toNumber(item.qty),
-        unitPrice: toNumber(item.unitPrice),
-        weightLbs: toNumber(item.weightLbs),
-        confidence: parsed.confidence || "medium",
-      }))
+      .map(item => {
+        const itemName = item.itemName ?? item.name;
+        const itemValue = item.itemValue ?? item.printedAmount;
+        const discountAmount = toNumber(item.discountAmount);
+        const originalItemValue = toNumber(item.originalItemValue);
+        const discountApplication = item.discountApplication || (
+          discountAmount != null && discountAmount > 0 ? "already_reflected" : "none"
+        );
+        return {
+          name: normalizeItemName(itemName),
+          printedAmount: round2(itemValue),
+          originalAmount: originalItemValue,
+          discountApplied: Boolean(item.discountApplied ?? (discountAmount != null && discountAmount > 0)),
+          discountAmount,
+          discountLabel: item.discountLabel ?? null,
+          discountApplication,
+          sourceText: item.sourceText ?? null,
+          itemCode: item.itemCode ?? null,
+          qty: toNumber(item.qty),
+          unitPrice: toNumber(item.unitPrice),
+          weightLbs: toNumber(item.weightLbs),
+          confidence: parsed.confidence || "medium",
+        };
+      })
       .filter(item => item.printedAmount >= 0.01),
     subtotal: toNumber(parsed.subtotal),
-    tax: toNumber(parsed.tax),
-    tip: toNumber(parsed.tip),
-    fees: toNumber(parsed.fees),
+    tax: additionalFeeSummary.tax ?? toNumber(parsed.tax),
+    tip: additionalFeeSummary.tip ?? toNumber(parsed.tip),
+    fees: additionalFeeSummary.fees ?? toNumber(parsed.fees),
+    additionalFees,
+    additionalFeesTotal: additionalFeeSummary.additionalFeesTotal ?? toNumber(parsed.additionalFeesTotal),
+    itemDiscountTotal: toNumber(parsed.itemDiscountTotal),
+    discount: toNumber(parsed.discount),
     orderLevelDiscount: toNumber(parsed.orderLevelDiscount),
-    grandTotal: toNumber(parsed.grandTotal),
+    grandTotal: toNumber(parsed.grandTotal ?? parsed.total),
     confidence: parsed.confidence || "medium",
     notes: parsed.notes || null,
   };
@@ -2615,9 +2931,13 @@ function suppressUnchargedSuggestedTip(receipt, reqId) {
   const withTipGap = round2(Math.abs(totalWithTip - grandTotal));
 
   if (withoutTipGap <= 0.03 && withTipGap > 0.03) {
+    const additionalFees = removeTipAdditionalFees(receipt.additionalFees);
+    const additionalFeeSummary = summarizeAdditionalFees(additionalFees);
     const nextReceipt = {
       ...receipt,
       tip: 0,
+      additionalFees,
+      additionalFeesTotal: additionalFeeSummary.additionalFeesTotal,
       notes: [
         receipt.notes,
         `Ignored likely suggested tip $${tip.toFixed(2)} because the charged total already reconciles without tip.`,
@@ -3489,14 +3809,19 @@ function buildApiResponse(parseResult, timings, reqId) {
     currency: parsed.currency || "USD",
     items: parsed.items.map(item => ({
       name: item.normalizedName || item.name,
+      itemName: item.normalizedName || item.name,
       rawName: item.rawName || item.name,
       normalizedName: item.normalizedName || item.name,
       normalizationSource: item.normalizationSource || "local",
       itemCode: item.itemCode ?? null,
       amount: item.amount,
+      itemValue: item.amount,
       originalAmount: item.originalAmount ?? null,
+      originalItemValue: item.originalAmount ?? item.amount,
       itemDiscount: item.itemDiscount ?? null,
+      discountApplied: (item.itemDiscount ?? 0) > 0 || item.discountApplied === true,
       itemDiscountLabel: item.itemDiscountLabel ?? null,
+      discountApplication: item.discountApplication ?? ((item.itemDiscount ?? 0) > 0 ? "already_reflected" : "none"),
       hasItemDiscount: (item.itemDiscount ?? 0) > 0,
       discountDisplayLabel:
         (item.itemDiscount ?? 0) > 0
@@ -3521,8 +3846,13 @@ function buildApiResponse(parseResult, timings, reqId) {
     tax: parsed.tax,
     tip: parsed.tip,
     fees: parsed.fees,
+    additionalFees: parsed.additionalFees || [],
+    additionalFeesTotal: parsed.additionalFeesTotal ?? summarizeAdditionalFees(parsed.additionalFees || []).additionalFeesTotal,
+    itemDiscountTotal: parsed.itemDiscountTotal ?? round2(parsed.items.reduce((sum, item) => sum + (item.itemDiscount ?? item.discountAmount ?? 0), 0)),
+    discount: parsed.discount ?? null,
     orderLevelDiscount: parsed.orderLevelDiscount,
     grandTotal: parsed.grandTotal,
+    total: parsed.grandTotal,
     confidence,
     status,
     notes: parsed.notes,
@@ -3866,7 +4196,9 @@ app.post("/parse-receipt", requireAppAuth, async (req, res) => {
     decode_ms: 0,
     temp_file_write_ms: 0,
     ocr_ms: 0,
+    mistral_ocr_ms: 0,
     deterministic_cleanup_ms: 0,
+    mistral_mapping_ms: 0,
     contradiction_resolution_ms: 0,
     reconciliation_ms: 0,
     total_ms: 0,
@@ -4026,6 +4358,7 @@ app.post("/parse-receipt", requireAppAuth, async (req, res) => {
     });
     const candidateSelection = selectMistralReceiptCandidate(parsed, ocrText, reqId);
     timings.ocr_ms = Date.now() - ocrStart;
+    timings.mistral_ocr_ms = timings.ocr_ms;
     trackAnalyticsEvent({
       ...analyticsContext,
       event_name: "receipt_ocr_completed",
@@ -4095,6 +4428,7 @@ app.post("/parse-receipt", requireAppAuth, async (req, res) => {
             : null,
       ].filter(Boolean).join(" ") || normalized.notes;
       timings.deterministic_cleanup_ms = Date.now() - deterministicCleanupStart;
+      timings.mistral_mapping_ms = timings.deterministic_cleanup_ms;
 
       resolutionResult = {
         receipt: normalized,
@@ -4110,10 +4444,6 @@ app.post("/parse-receipt", requireAppAuth, async (req, res) => {
       const contradictionStart = Date.now();
       resolutionResult = resolveFinancialContradictions(normalized, reqId, {
         ocrText,
-        appleOcrText,
-        localHints,
-        localParseResult,
-        localCandidates,
       });
       normalized = resolutionResult.receipt;
       timings.contradiction_resolution_ms = Date.now() - contradictionStart;
