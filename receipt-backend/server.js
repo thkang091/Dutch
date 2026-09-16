@@ -171,8 +171,8 @@ const AdditionalFeeTypeEnum = z.enum([
 ]);
 
 const ReceiptItemSchema = z.object({
-  itemName: z.string().describe("Visible purchased item name. Keep it short and literal."),
-  itemValue: z.number().describe("Final effective value for bill splitting after any separate item deduction. Never include tax, tip, or fees."),
+  itemName: z.string().describe("Exact purchased item name or description as printed. Never return subtotal, tax, tip, fees, total, payment, change, or savings summary text."),
+  itemValue: z.number().describe("Final effective purchased-item amount that participates in receipt math after item-specific discounts. Never include tax, tip, fees, subtotal, or total."),
   originalItemValue: z.number().nullable().optional().describe("Original item value before a separate item-level deduction, only when visibly supported."),
   discountApplied: z.boolean().optional().describe("True when a visible item-level discount or promotion applies to this item."),
   discountAmount: z.number().nullable().optional().describe("Positive visible item discount magnitude. Metadata only; downstream must never subtract it again."),
@@ -183,30 +183,33 @@ const ReceiptItemSchema = z.object({
 });
 
 const AdditionalFeeSchema = z.object({
-  feeLabel: z.string().describe("Visible printed label for this distinct non-item positive charge."),
-  feeType: AdditionalFeeTypeEnum.describe("Specific type of this charge."),
-  amount: z.number().describe("Actual charged monetary amount. Must be positive."),
+  feeName: z.string().describe("Visible printed label for this distinct non-item positive charge."),
+  feeValue: z.number().describe("Actual charged monetary amount. Must be positive."),
+  feeLabel: z.string().nullable().optional().describe("Legacy alias for feeName."),
+  feeType: AdditionalFeeTypeEnum.optional().describe("Specific type of this charge, inferred from feeName when omitted."),
+  amount: z.number().nullable().optional().describe("Legacy alias for feeValue."),
   rate: z.number().nullable().optional().describe("Visible percentage/rate, e.g. 8.875 for 8.875%; null if none is printed."),
-  isTax: z.boolean().describe("True for tax/VAT/GST/HST/PST/QST entries."),
-  isTipOrGratuity: z.boolean().describe("True for actual charged tip/gratuity entries."),
+  isTax: z.boolean().optional().describe("True for tax/VAT/GST/HST/PST/QST entries."),
+  isTipOrGratuity: z.boolean().optional().describe("True for actual charged tip/gratuity entries."),
 });
 
 const MistralReceiptSchema = z.object({
-  merchant: z.string().nullable().optional().describe("Merchant name from top of receipt"),
+  merchantName: z.string().describe("Merchant, store, or restaurant name exactly as shown. Never return address, card company, bank, payment processor, or terminal name."),
+  merchant: z.string().nullable().optional().describe("Legacy alias for merchantName"),
   receiptDate: z.string().nullable().optional().describe("Receipt date YYYY-MM-DD format"),
   currency: z.string().nullable().optional().describe("Currency code (USD, CAD, EUR, etc.)"),
-  items: z.array(ReceiptItemSchema).describe("Purchased items, transcribed exactly as printed"),
+  items: z.array(ReceiptItemSchema).describe("Purchased merchandise, food, drinks, products, or services only. Never include subtotal, tax, tip, fees, total, payment, change, or savings summaries."),
   subtotal: z.number().nullable().optional().describe("Subtotal if explicitly shown"),
-  tax: z.number().nullable().optional().describe("Legacy total of tax entries derived from additionalFees"),
-  tip: z.number().nullable().optional().describe("Legacy total of actual charged tip/gratuity entries derived from additionalFees"),
+  tax: z.number().describe("Total tax actually charged. Return 0 when no tax was charged. Tax must never appear in items[]."),
+  tip: z.number().describe("Final tip/gratuity actually charged. Return 0 when none was charged. Suggested tips must never appear here or in items[]."),
   fees: z.number().nullable().optional().describe("Legacy total of non-tax, non-tip additionalFees"),
-  additionalFees: z.array(AdditionalFeeSchema).optional().describe("Every distinct printed positive non-item charge that contributes to the final amount. Never combine separate tax/fee/tip lines."),
-  additionalFeesTotal: z.number().nullable().optional().describe("Sum of additionalFees.amount"),
-  itemDiscountTotal: z.number().nullable().optional().describe("Sum of item-level discount amounts when shown"),
-  discount: z.number().nullable().optional().describe("Reported receipt savings when shown; informational unless it is an order-wide deduction"),
-  orderLevelDiscount: z.number().nullable().optional().describe("Order-wide discount not already reflected in item printedAmount values"),
-  grandTotal: z.number().nullable().optional().describe("Final total (BALANCE DUE, GRAND TOTAL, etc.)"),
-  total: z.number().nullable().optional().describe("Legacy alias for grandTotal"),
+  additionalFees: z.array(AdditionalFeeSchema).describe("Every additional charged fee that contributes to the final total but is not a purchased item, tax, or tip."),
+  additionalFeesTotal: z.number().nullable().optional().describe("Legacy sum of additionalFees feeValue/amount"),
+  itemDiscountTotal: z.number().describe("Total item-specific savings when shown. Informational only; itemValue already includes item discounts."),
+  discount: z.number().describe("Total reported savings when shown. Informational metadata only; do not subtract automatically from receipt math."),
+  orderLevelDiscount: z.number().describe("Separate order-level discount not tied to a specific item. Subtract this once from receipt math."),
+  grandTotal: z.number().nullable().optional().describe("Legacy alias for total"),
+  total: z.number().nullable().optional().describe("Final grand total, amount due, balance due, or amount actually charged. Never return subtotal. Use null when it is not visible enough to trust."),
   confidence: ConfidenceEnum.nullable().optional().describe("OCR clarity confidence, not math confidence"),
   notes: z.string().nullable().optional().describe("Parsing notes or warnings"),
 });
@@ -1199,7 +1202,15 @@ function reconcileBankDocument(bankDocument) {
 const EXTRACTION_PROMPT = `Read this receipt like a careful bill-splitting scanner.
 
 Goal:
-Return the merchant name, every purchased item, item-level discounts, receipt/order discounts, every positive non-item charge, and the final charged/owed total. Use the receipt image as the evidence.
+Return only this small receipt schema from the image evidence:
+- merchantName
+- purchased items with itemName and final itemValue
+- tax
+- tip
+- additionalFees with feeName and feeValue
+- discount metadata
+- orderLevelDiscount
+- total
 
 Core evidence rules:
 1. Never invent missing products, prices, tax, fees, tips, discounts, quantities, dates, or totals.
@@ -1219,14 +1230,14 @@ Purchased item rules:
 - Keep duplicate purchases as separate items only when they are actual separate purchased rows.
 
 Never output these as purchased items:
-SUBTOTAL, TAX, SALES TAX, TOTAL, BALANCE, AMOUNT DUE, NET SALES, NET TOTAL, CHANGE, CASH, CREDIT, DEBIT, VISA, MASTERCARD, AMEX, tips, gratuities, service charges, fees, suggested gratuity rows, tip suggestions, loyalty points, rewards, savings summaries, payment methods, transaction IDs, authorization codes, and discount-only rows.
+SUBTOTAL, TAX, SALES TAX, TOTAL, GRAND TOTAL, BALANCE, AMOUNT DUE, AMOUNT PAID, NET SALES, NET TOTAL, CHANGE, CASH, CREDIT, DEBIT, VISA, MASTERCARD, AMEX, tips, gratuities, service charges, fees, suggested gratuity rows, tip suggestions, loyalty points, rewards, savings summaries, payment methods, transaction IDs, authorization codes, and discount-only rows.
 
 Additional charge rules:
-- Put every actual positive non-item charge in additionalFees as a separate entry.
+- Put every actual positive non-item charge in additionalFees as a separate entry with feeName and feeValue.
 - Preserve separate printed charges separately. STATE TAX 2.10 and CITY TAX 0.75 are two entries, not one tax of 2.85.
 - Include actual charged sales/state/local/city/county/district taxes, VAT/GST/HST/PST/QST, occupancy/tourism/hotel/alcohol taxes, tips, gratuity, automatic gratuity, service/delivery/convenience/processing/platform/booking/facility/resort fees, surcharges, bag fees, deposits, recycling/environmental/regulatory fees, and other positive fees.
 - Only include amounts actually charged. Do not include suggested tip choices, blank tip lines, selectable 15%/18%/20% rows, tax rates without charged amounts, subtotal, total, discounts, coupons, savings, cash tendered, card payments, change, or authorization holds.
-- If both a rate and charged amount are printed, put the percentage in rate and the monetary charge in amount.
+- If both a rate and charged amount are printed, put the percentage in rate and the monetary charge in feeValue.
 - Derive tax, tip, fees, and additionalFeesTotal from additionalFees for compatibility.
 
 Summary field rules:
@@ -1234,12 +1245,15 @@ Summary field rules:
 - tax is the total of actual tax entries in additionalFees. Do not infer tax because receipts often have tax.
 - fees is the total of non-tax, non-tip entries in additionalFees.
 - tip is the total of actual charged tip/gratuity entries in additionalFees. Never use suggested tip tables or suggested dollar amounts.
-- orderLevelDiscount is a visible order-wide discount/coupon not already reflected in item printedAmount values.
-- grandTotal is the final charged or owed transaction amount. Strong labels include TOTAL, GRAND TOTAL, AMOUNT DUE, BALANCE DUE, and ORDER TOTAL. Payment amount context can support it.
+- itemDiscountTotal and discount are informational only because itemValue already incorporates item-specific discounts.
+- orderLevelDiscount is a visible order-wide discount/coupon not already reflected in itemValue values. It is part of math and must be subtracted once.
+- total is the final charged or owed transaction amount. Strong labels include TOTAL, GRAND TOTAL, AMOUNT DUE, BALANCE DUE, FINAL TOTAL, AMOUNT CHARGED, and ORDER TOTAL. Payment amount context can support it.
 - Do not treat NET SALES as grandTotal. NET SALES normally behaves like pre-tax subtotal. Be very cautious with NET TOTAL unless final payment/due context proves it is the charged total.
 
 Internal math check:
-Compute itemSum = sum(itemValue). Compare itemSum with subtotal when subtotal is visible. Compare itemSum + additionalFeesTotal - orderLevelDiscount with grandTotal. Do not expose this reasoning. Return structured JSON only.
+Compute:
+sum(items[].itemValue) + tax + tip + sum(additionalFees[].feeValue) - orderLevelDiscount ≈ total.
+Do not expose this reasoning. Return structured JSON only.
 
 Return JSON only.`;
 
@@ -1877,8 +1891,8 @@ function isExcludedAdditionalFeeLabel(label) {
 
 function normalizeAdditionalFeeEntry(raw, fallbackRole = null) {
   if (!raw || typeof raw !== "object") return null;
-  const label = cleanOcrLine(raw.feeLabel ?? raw.label ?? raw.name ?? "");
-  const amount = toNumber(raw.amount ?? raw.value);
+  const label = cleanOcrLine(raw.feeName ?? raw.feeLabel ?? raw.label ?? raw.name ?? "");
+  const amount = toNumber(raw.feeValue ?? raw.amount ?? raw.value);
   if (amount == null || amount <= 0) return null;
   if (isExcludedAdditionalFeeLabel(label)) return null;
 
@@ -1889,6 +1903,8 @@ function normalizeAdditionalFeeEntry(raw, fallbackRole = null) {
     : isTipOrGratuityFeeType(feeType);
 
   return {
+    feeName: label || (isTax ? "Tax" : isTipOrGratuity ? "Tip" : "Fee"),
+    feeValue: round2(amount),
     feeLabel: label || (isTax ? "Tax" : isTipOrGratuity ? "Tip" : "Fee"),
     feeType,
     amount: round2(amount),
@@ -2830,7 +2846,7 @@ function normalizeParsedReceipt(parsed) {
   const additionalFeeSummary = summarizeAdditionalFees(additionalFees);
 
   return {
-    merchant: normalizeMerchant(parsed.merchant),
+    merchant: normalizeMerchant(parsed.merchantName ?? parsed.merchant),
     receiptDate: parsed.receiptDate || null,
     currency: parsed.currency || "USD",
     items: (parsed.items || [])
@@ -2868,7 +2884,7 @@ function normalizeParsedReceipt(parsed) {
     itemDiscountTotal: toNumber(parsed.itemDiscountTotal),
     discount: toNumber(parsed.discount),
     orderLevelDiscount: toNumber(parsed.orderLevelDiscount),
-    grandTotal: toNumber(parsed.grandTotal ?? parsed.total),
+    grandTotal: toNumber(parsed.total ?? parsed.grandTotal),
     confidence: parsed.confidence || "medium",
     notes: parsed.notes || null,
   };
