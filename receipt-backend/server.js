@@ -20,7 +20,7 @@ const TEMP_DIR = path.resolve(process.cwd(), "tmp_receipts");
 const DATA_DIR = path.resolve(process.cwd(), "data");
 const SAVE_TEMP_RECEIPTS = process.env.SAVE_TEMP_RECEIPTS === "true";
 const RECOMMENDED_IMAGE_MAX_BYTES = 2 * 1024 * 1024;
-const MISTRAL_OCR_MODEL = process.env.MISTRAL_OCR_MODEL || "mistral-ocr-latest";
+const MISTRAL_OCR_MODEL = process.env.MISTRAL_OCR_MODEL || "mistral-ocr-4-1";
 const ADMIN_BEARER_TOKEN = process.env.ADMIN_BEARER_TOKEN || "";
 const ANALYTICS_EVENTS_FILE = process.env.ANALYTICS_EVENTS_FILE || path.join(DATA_DIR, "analytics_events.jsonl");
 const ANALYTICS_RETENTION_DAYS = Number(process.env.ANALYTICS_RETENTION_DAYS || 90);
@@ -62,6 +62,8 @@ const STAGED_FIRST_RESPONSE_TIMEOUT_MS = Number(
   process.env.STAGED_FIRST_RESPONSE_TIMEOUT_MS || Math.max(250, RECEIPT_STAGED_TARGET_MS - 500)
 );
 const ENABLE_MISTRAL_WORD_CONFIDENCE = process.env.ENABLE_MISTRAL_WORD_CONFIDENCE === "true";
+const ENABLE_MISTRAL_OCR_DEBUG =
+  process.env.ENABLE_MISTRAL_OCR_DEBUG === "true" || ENABLE_DEBUG_RESPONSE;
 const APPLE_OCR_CONTEXT_MAX_CHARS = Number(process.env.APPLE_OCR_CONTEXT_MAX_CHARS || 6000);
 const LOCAL_PARSE_CONTEXT_MAX_ITEMS = Number(process.env.LOCAL_PARSE_CONTEXT_MAX_ITEMS || 40);
 const RECEIPT_ARBITRATION_DEBUG =
@@ -133,6 +135,16 @@ const DiscountApplicationEnum = z.enum([
   "informational",
 ]);
 
+const MoneyStringSchema = z.preprocess(
+  value => value == null ? null : String(value),
+  z.string().nullable()
+).describe("Decimal money value as text, e.g. 42.17. Do not include currency symbols; use null when not visible.");
+
+const RateStringSchema = z.preprocess(
+  value => value == null ? null : String(value),
+  z.string().nullable()
+).describe("Visible percentage/rate as text, e.g. 8.875; null if none is printed.");
+
 const AdditionalFeeTypeEnum = z.enum([
   "sales_tax",
   "state_tax",
@@ -172,23 +184,23 @@ const AdditionalFeeTypeEnum = z.enum([
 
 const ReceiptItemSchema = z.object({
   itemName: z.string().describe("Exact purchased item name or description as printed. Never return subtotal, tax, tip, fees, total, payment, change, or savings summary text."),
-  itemValue: z.number().describe("Final effective purchased-item amount that participates in receipt math after item-specific discounts. Never include tax, tip, fees, subtotal, or total."),
-  originalItemValue: z.number().nullable().optional().describe("Original item value before a separate item-level deduction, only when visibly supported."),
+  itemValue: MoneyStringSchema.describe("Final effective purchased-item amount that participates in receipt math after item-specific discounts. Never include tax, tip, fees, subtotal, or total."),
+  originalItemValue: MoneyStringSchema.optional().describe("Original item value before a separate item-level deduction, only when visibly supported."),
   discountApplied: z.boolean().optional().describe("True when a visible item-level discount or promotion applies to this item."),
-  discountAmount: z.number().nullable().optional().describe("Positive visible item discount magnitude. Metadata only; downstream must never subtract it again."),
+  discountAmount: MoneyStringSchema.optional().describe("Positive visible item discount magnitude. Metadata only; downstream must never subtract it again."),
   discountLabel: z.string().nullable().optional().describe("Visible discount label tied to this item."),
   discountApplication: DiscountApplicationEnum.optional().describe("How the discount affects itemValue: none, already_reflected, separate_deduction, or informational."),
   name: z.string().nullable().optional().describe("Legacy alias for itemName."),
-  printedAmount: z.number().nullable().optional().describe("Legacy alias for itemValue."),
+  printedAmount: MoneyStringSchema.optional().describe("Legacy alias for itemValue."),
 });
 
 const AdditionalFeeSchema = z.object({
   feeName: z.string().describe("Visible printed label for this distinct non-item positive charge."),
-  feeValue: z.number().describe("Actual charged monetary amount. Must be positive."),
+  feeValue: MoneyStringSchema.describe("Actual charged monetary amount. Must be positive."),
   feeLabel: z.string().nullable().optional().describe("Legacy alias for feeName."),
   feeType: AdditionalFeeTypeEnum.optional().describe("Specific type of this charge, inferred from feeName when omitted."),
-  amount: z.number().nullable().optional().describe("Legacy alias for feeValue."),
-  rate: z.number().nullable().optional().describe("Visible percentage/rate, e.g. 8.875 for 8.875%; null if none is printed."),
+  amount: MoneyStringSchema.optional().describe("Legacy alias for feeValue."),
+  rate: RateStringSchema.optional().describe("Visible percentage/rate, e.g. 8.875 for 8.875%; null if none is printed."),
   isTax: z.boolean().optional().describe("True for tax/VAT/GST/HST/PST/QST entries."),
   isTipOrGratuity: z.boolean().optional().describe("True for actual charged tip/gratuity entries."),
 });
@@ -199,17 +211,17 @@ const MistralReceiptSchema = z.object({
   receiptDate: z.string().nullable().optional().describe("Receipt date YYYY-MM-DD format"),
   currency: z.string().nullable().optional().describe("Currency code (USD, CAD, EUR, etc.)"),
   items: z.array(ReceiptItemSchema).describe("Purchased merchandise, food, drinks, products, or services only. Never include subtotal, tax, tip, fees, total, payment, change, or savings summaries."),
-  subtotal: z.number().nullable().optional().describe("Subtotal if explicitly shown"),
-  tax: z.number().describe("Total tax actually charged. Return 0 when no tax was charged. Tax must never appear in items[]."),
-  tip: z.number().describe("Final tip/gratuity actually charged. Return 0 when none was charged. Suggested tips must never appear here or in items[]."),
-  fees: z.number().nullable().optional().describe("Legacy total of non-tax, non-tip additionalFees"),
+  subtotal: MoneyStringSchema.optional().describe("Subtotal if explicitly shown"),
+  tax: MoneyStringSchema.describe("Total tax actually charged. Return 0 when no tax was charged. Tax must never appear in items[]."),
+  tip: MoneyStringSchema.describe("Final tip/gratuity actually charged. Return 0 when none was charged. Suggested tips must never appear here or in items[]."),
+  fees: MoneyStringSchema.optional().describe("Legacy total of non-tax, non-tip additionalFees"),
   additionalFees: z.array(AdditionalFeeSchema).describe("Every additional charged fee that contributes to the final total but is not a purchased item, tax, or tip."),
-  additionalFeesTotal: z.number().nullable().optional().describe("Legacy sum of additionalFees feeValue/amount"),
-  itemDiscountTotal: z.number().describe("Total item-specific savings when shown. Informational only; itemValue already includes item discounts."),
-  discount: z.number().describe("Total reported savings when shown. Informational metadata only; do not subtract automatically from receipt math."),
-  orderLevelDiscount: z.number().describe("Separate order-level discount not tied to a specific item. Subtract this once from receipt math."),
-  grandTotal: z.number().nullable().optional().describe("Legacy alias for total"),
-  total: z.number().nullable().optional().describe("Final grand total, amount due, balance due, or amount actually charged. Never return subtotal. Use null when it is not visible enough to trust."),
+  additionalFeesTotal: MoneyStringSchema.optional().describe("Legacy sum of additionalFees feeValue/amount"),
+  itemDiscountTotal: MoneyStringSchema.describe("Total item-specific savings when shown. Informational only; itemValue already includes item discounts."),
+  discount: MoneyStringSchema.describe("Total reported savings when shown. Informational metadata only; do not subtract automatically from receipt math."),
+  orderLevelDiscount: MoneyStringSchema.describe("Separate order-level discount not tied to a specific item. Subtract this once from receipt math."),
+  grandTotal: MoneyStringSchema.optional().describe("Legacy alias for total"),
+  total: MoneyStringSchema.optional().describe("Final grand total, amount due, balance due, or amount actually charged. Never return subtotal. Use null when it is not visible enough to trust."),
   confidence: ConfidenceEnum.nullable().optional().describe("OCR clarity confidence, not math confidence"),
   notes: z.string().nullable().optional().describe("Parsing notes or warnings"),
 });
@@ -218,12 +230,12 @@ const QuickReceiptTotalSchema = z.object({
   merchant: z.string().nullable().optional().describe("Merchant name from top of receipt"),
   receiptDate: z.string().nullable().optional().describe("Receipt date YYYY-MM-DD format"),
   currency: z.string().nullable().optional().describe("Currency code, usually USD"),
-  subtotal: z.number().nullable().optional().describe("Subtotal if explicitly shown"),
-  tax: z.number().nullable().optional().describe("Sales tax amount"),
-  tip: z.number().nullable().optional().describe("Tip or gratuity amount"),
-  fees: z.number().nullable().optional().describe("Service, delivery, bag, or other fees"),
-  orderLevelDiscount: z.number().nullable().optional().describe("Order-wide discount if clearly shown"),
-  grandTotal: z.number().nullable().optional().describe("Final amount due, balance due, grand total, or total charged"),
+  subtotal: MoneyStringSchema.optional().describe("Subtotal if explicitly shown"),
+  tax: MoneyStringSchema.optional().describe("Sales tax amount"),
+  tip: MoneyStringSchema.optional().describe("Tip or gratuity amount"),
+  fees: MoneyStringSchema.optional().describe("Service, delivery, bag, or other fees"),
+  orderLevelDiscount: MoneyStringSchema.optional().describe("Order-wide discount if clearly shown"),
+  grandTotal: MoneyStringSchema.optional().describe("Final amount due, balance due, grand total, or total charged"),
   confidence: ConfidenceEnum.describe("Overall confidence in totals extraction"),
   totalLabel: z.string().nullable().optional().describe("Visible label used for the selected final total"),
   notes: z.string().nullable().optional().describe("Short warning if totals are ambiguous"),
@@ -448,12 +460,20 @@ function parseAndValidateDocumentAnnotation(annotation, schema) {
     throw error;
   }
   let raw;
-  try {
-    raw = JSON.parse(annotation);
-  } catch (err) {
-    const error = new Error("Structured annotation JSON is malformed");
+  if (typeof annotation === "string") {
+    try {
+      raw = JSON.parse(annotation);
+    } catch (err) {
+      const error = new Error("Structured annotation JSON is malformed");
+      error.code = "MALFORMED_ANNOTATION";
+      error.cause = err;
+      throw error;
+    }
+  } else if (typeof annotation === "object") {
+    raw = annotation;
+  } else {
+    const error = new Error("Structured annotation has an unsupported type");
     error.code = "MALFORMED_ANNOTATION";
-    error.cause = err;
     throw error;
   }
   try {
@@ -1249,6 +1269,7 @@ Summary field rules:
 - orderLevelDiscount is a visible order-wide discount/coupon not already reflected in itemValue values. It is part of math and must be subtracted once.
 - total is the final charged or owed transaction amount. Strong labels include TOTAL, GRAND TOTAL, AMOUNT DUE, BALANCE DUE, FINAL TOTAL, AMOUNT CHARGED, and ORDER TOTAL. Payment amount context can support it.
 - Do not treat NET SALES as grandTotal. NET SALES normally behaves like pre-tax subtotal. Be very cautious with NET TOTAL unless final payment/due context proves it is the charged total.
+- Do not omit a visible final total merely because items, fees, tax, or discounts do not reconcile yet. Return the visibly printed final total and let downstream validation mark the math mismatch.
 
 Internal math check:
 Compute:
@@ -1512,8 +1533,17 @@ function round2(value) {
 
 function toNumber(value) {
   if (value == null) return null;
-  const num = Number(value);
-  return isNaN(num) ? null : round2(num);
+  let text = String(value).trim();
+  if (!text || /^null$/i.test(text) || /^n\/?a$/i.test(text)) return null;
+  const negative = /^\s*\(/.test(text) || /^\s*-/.test(text);
+  text = text
+    .replace(/[,$\s]/g, "")
+    .replace(/^\(/, "")
+    .replace(/\)$/, "")
+    .replace(/^\+/, "")
+    .replace(/^-/, "");
+  const num = Number(text);
+  return isNaN(num) ? null : round2(negative ? -num : num);
 }
 
 function normalizeMerchant(merchant) {
@@ -2085,6 +2115,65 @@ function extractReceiptMoneyEvidence({ ocrText = "", appleOcrText = "" } = {}) {
   }
 
   return evidence;
+}
+
+function rawDocumentAnnotationObject(annotation) {
+  if (!annotation) return null;
+  if (typeof annotation === "object") return annotation;
+  if (typeof annotation !== "string") return null;
+  try {
+    return JSON.parse(annotation);
+  } catch {
+    return null;
+  }
+}
+
+function annotationGrandTotalValue(rawAnnotation) {
+  if (!rawAnnotation || typeof rawAnnotation !== "object") return null;
+  return toNumber(rawAnnotation.total ?? rawAnnotation.grandTotal);
+}
+
+function visibleGrandTotalCandidatesFromOcr(ocrText) {
+  return extractReceiptMoneyEvidence({ ocrText })
+    .filter(evidence => evidence.source === "mistral" && evidence.role === "grandTotal")
+    .map(evidence => ({
+      amount: evidence.amount,
+      line: evidence.line,
+    }))
+    .slice(0, 5);
+}
+
+function buildExtractionDiagnostics({ ocrText = "", result = null, parsed = null, reconciliation = null } = {}) {
+  const rawAnnotation = rawDocumentAnnotationObject(result?.documentAnnotation);
+  const annotationGrandTotal = annotationGrandTotalValue(rawAnnotation);
+  const normalizedGrandTotal = toNumber(parsed?.grandTotal);
+  const ocrGrandTotalCandidates = visibleGrandTotalCandidatesFromOcr(ocrText);
+  const mismatchReasons = reconciliation?.mismatchReasons || [];
+  const missingGrandTotal = normalizedGrandTotal == null || mismatchReasons.includes("no_grand_total");
+
+  let totalLossLayer = "none";
+  if (missingGrandTotal) {
+    if (ocrGrandTotalCandidates.length && annotationGrandTotal == null) {
+      totalLossLayer = "annotation_missing_total_visible_in_ocr";
+    } else if (annotationGrandTotal != null && normalizedGrandTotal == null) {
+      totalLossLayer = "normalization_lost_annotation_total";
+    } else if (!ocrGrandTotalCandidates.length && annotationGrandTotal == null) {
+      totalLossLayer = "ocr_and_annotation_missing_total";
+    } else {
+      totalLossLayer = "reconciliation_missing_total";
+    }
+  }
+
+  return {
+    modelRequested: MISTRAL_OCR_MODEL,
+    modelReturned: result?.model || null,
+    ocrTextLength: String(ocrText || "").length,
+    ocrGrandTotalCandidates,
+    annotationPresent: rawAnnotation != null,
+    annotationGrandTotal,
+    normalizedGrandTotal,
+    totalLossLayer,
+  };
 }
 
 function localEvidenceItems(localParseResult, localCandidates) {
@@ -2668,6 +2757,7 @@ async function runMistralOcr({
     document: buildMistralDocument(buffer, mimeType),
     documentAnnotationFormat,
     documentAnnotationPrompt,
+    includeBlocks: true,
   };
   if (ENABLE_MISTRAL_WORD_CONFIDENCE) {
     ocrRequest.confidenceScoresGranularity = "word";
@@ -2687,12 +2777,22 @@ async function runMistralOcr({
 
   const pages = result.pages || [];
   const ocrText = pages.map(page => page.markdown || "").join("\n\n");
+  const annotationPreview = typeof result.documentAnnotation === "string"
+    ? result.documentAnnotation
+    : result.documentAnnotation
+      ? JSON.stringify(result.documentAnnotation)
+      : "";
+  console.log(`[${reqId}] Mistral OCR raw lengths: markdown=${ocrText.length} annotation=${annotationPreview.length}`);
+  if (ENABLE_MISTRAL_OCR_DEBUG) {
+    console.log(`[${reqId}] === RAW MISTRAL OCR MARKDOWN ===\n${ocrText}`);
+    console.log(`[${reqId}] === RAW MISTRAL DOCUMENT ANNOTATION ===\n${annotationPreview || "(none)"}`);
+  }
 
   return {
     ocrText,
     pages,
     pageCount: pages.length || 1,
-    model: MISTRAL_OCR_MODEL,
+    model: result?.model || MISTRAL_OCR_MODEL,
     wordConfidenceScores: ENABLE_MISTRAL_WORD_CONFIDENCE
       ? pages.flatMap(page => page.words || page.wordConfidenceScores || [])
       : [],
@@ -3790,6 +3890,7 @@ function determineParseStatus(reconciliation, normalized, hasRefund, resolutionR
 
 function buildApiResponse(parseResult, timings, reqId) {
   const { parsed, ocrText, result, reconciliation, rejected, resolutionResult } = parseResult;
+  const extractionDiagnostics = buildExtractionDiagnostics({ ocrText, result, parsed, reconciliation });
 
   if (!parsed) {
     return {
@@ -3800,6 +3901,7 @@ function buildApiResponse(parseResult, timings, reqId) {
       status: "needs_review",
       route: "extraction_failed",
       routeReason: "no_structured_output_from_mistral",
+      extractionDiagnostics,
       nameNormalizationStatus: "local_complete",
       timings,
     };
@@ -3815,6 +3917,13 @@ function buildApiResponse(parseResult, timings, reqId) {
     routeReason = reconciliation.mathCheckPassed ? "exact_reconciliation" : routeReason;
   } else if (status === "partial") {
     routeReason = reconciliation.mismatchReasons.join(", ") || "partial_extraction";
+    if (reconciliation.mismatchReasons.includes("no_grand_total")) {
+      routeReason = extractionDiagnostics.totalLossLayer === "annotation_missing_total_visible_in_ocr"
+        ? `annotation_missing_total_visible_in_ocr:${extractionDiagnostics.ocrGrandTotalCandidates[0]?.amount ?? "unknown"}`
+        : extractionDiagnostics.totalLossLayer === "normalization_lost_annotation_total"
+          ? `normalization_lost_annotation_total:${extractionDiagnostics.annotationGrandTotal ?? "unknown"}`
+          : routeReason;
+    }
   } else if (status === "needs_review") {
     routeReason = "reconciliation_failed_or_no_items";
   }
@@ -3882,14 +3991,16 @@ function buildApiResponse(parseResult, timings, reqId) {
       mathCheckPassed: reconciliation.mathCheckPassed,
       mismatchReasons: reconciliation.mismatchReasons,
     },
+    extractionDiagnostics,
     route,
     routeReason,
     timings,
     debug: ENABLE_DEBUG_RESPONSE ? {
       parser_version: "production_v3_mistral_single_pass",
-      model_used: result?.model || "mistral-ocr-latest",
+      model_used: result?.model || MISTRAL_OCR_MODEL,
       ocr_text_length: ocrText.length,
       ocr_text: ocrText,
+      document_annotation: rawDocumentAnnotationObject(result?.documentAnnotation),
       rejected_items: rejected || [],
       has_refund_indicators: hasRefund,
       item_name_normalization: {
