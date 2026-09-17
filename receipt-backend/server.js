@@ -399,6 +399,113 @@ function fileHash(buffer) {
   return crypto.createHash("sha256").update(buffer).digest("hex");
 }
 
+function parseJpegExifOrientation(segment) {
+  if (!segment || segment.length < 14) return null;
+  if (segment.subarray(0, 6).toString("latin1") !== "Exif\0\0") return null;
+  const tiffOffset = 6;
+  const endian = segment.subarray(tiffOffset, tiffOffset + 2).toString("latin1");
+  const littleEndian = endian === "II";
+  if (!littleEndian && endian !== "MM") return null;
+  const readUInt16 = offset => littleEndian ? segment.readUInt16LE(offset) : segment.readUInt16BE(offset);
+  const readUInt32 = offset => littleEndian ? segment.readUInt32LE(offset) : segment.readUInt32BE(offset);
+  if (readUInt16(tiffOffset + 2) !== 42) return null;
+  const ifdOffset = tiffOffset + readUInt32(tiffOffset + 4);
+  if (ifdOffset + 2 > segment.length) return null;
+  const entryCount = readUInt16(ifdOffset);
+  for (let i = 0; i < entryCount; i += 1) {
+    const entryOffset = ifdOffset + 2 + i * 12;
+    if (entryOffset + 12 > segment.length) return null;
+    const tag = readUInt16(entryOffset);
+    if (tag === 0x0112) return readUInt16(entryOffset + 8);
+  }
+  return null;
+}
+
+function imageMetadataFromBuffer(buffer, mimeType) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 12) {
+    return { width: null, height: null, orientation: null };
+  }
+
+  if (mimeType === "image/png" && buffer.subarray(12, 16).toString("latin1") === "IHDR") {
+    return {
+      width: buffer.readUInt32BE(16),
+      height: buffer.readUInt32BE(20),
+      orientation: null,
+    };
+  }
+
+  if (mimeType === "image/jpeg" && buffer[0] === 0xff && buffer[1] === 0xd8) {
+    let offset = 2;
+    let orientation = null;
+    while (offset + 4 < buffer.length) {
+      if (buffer[offset] !== 0xff) {
+        offset += 1;
+        continue;
+      }
+      const marker = buffer[offset + 1];
+      if (marker === 0xda || marker === 0xd9) break;
+      const length = buffer.readUInt16BE(offset + 2);
+      if (!length || offset + 2 + length > buffer.length) break;
+      const payloadStart = offset + 4;
+      const payloadEnd = offset + 2 + length;
+      if (marker === 0xe1 && orientation == null) {
+        orientation = parseJpegExifOrientation(buffer.subarray(payloadStart, payloadEnd));
+      }
+      if ((marker >= 0xc0 && marker <= 0xc3) || (marker >= 0xc5 && marker <= 0xc7) || (marker >= 0xc9 && marker <= 0xcb) || (marker >= 0xcd && marker <= 0xcf)) {
+        return {
+          width: buffer.readUInt16BE(payloadStart + 3),
+          height: buffer.readUInt16BE(payloadStart + 1),
+          orientation,
+        };
+      }
+      offset += 2 + length;
+    }
+    return { width: null, height: null, orientation };
+  }
+
+  return { width: null, height: null, orientation: null };
+}
+
+function buildUploadDiagnostics(buffer, claimedMimeType, detectedMimeType, clientDiagnostics = null) {
+  const serverImage = imageMetadataFromBuffer(buffer, detectedMimeType);
+  return {
+    client: clientDiagnostics || null,
+    server: {
+      byteCount: buffer?.length || 0,
+      sha256: fileHash(buffer),
+      mimeTypeClaimed: claimedMimeType || null,
+      mimeTypeDetected: detectedMimeType || null,
+      width: serverImage.width,
+      height: serverImage.height,
+      orientation: serverImage.orientation,
+    },
+  };
+}
+
+function uploadDiagnosticsSummary(diagnostics) {
+  const server = diagnostics?.server || diagnostics;
+  if (!server) return "unavailable";
+  const dimensions = server.width && server.height ? `${server.width}x${server.height}` : "unknown_dims";
+  const sha = server.sha256 ? String(server.sha256).slice(0, 16) : "no_sha";
+  return `${server.mimeTypeDetected || server.mimeType || "unknown_mime"} ${dimensions} ${server.byteCount || 0}B sha256:${sha}`;
+}
+
+function logUploadDiagnostics(reqId, diagnostics) {
+  console.log(`[${reqId}] Upload diagnostics server=${uploadDiagnosticsSummary(diagnostics)}`);
+  if (diagnostics?.client) {
+    const clientUpload = diagnostics.client.upload || diagnostics.client;
+    console.log(`[${reqId}] Upload diagnostics client=${JSON.stringify({
+      source: clientUpload.uploadSource || diagnostics.client.uploadSource || null,
+      mimeType: clientUpload.mimeType || clientUpload.uploadedMimeType || null,
+      byteCount: clientUpload.byteCount || clientUpload.uploadedByteCount || null,
+      width: clientUpload.width || clientUpload.uploadedPixelWidth || null,
+      height: clientUpload.height || clientUpload.uploadedPixelHeight || null,
+      sha256: clientUpload.sha256 || clientUpload.uploadedSha256 || null,
+      original: diagnostics.client.original || null,
+    })}`);
+  }
+}
+
 function getCachedParse(hash, namespace) {
   const key = `${namespace}:${hash}`;
   const cached = parseCache.get(key);
@@ -1537,13 +1644,17 @@ function toNumber(value) {
   if (!text || /^null$/i.test(text) || /^n\/?a$/i.test(text)) return null;
   const negative = /^\s*\(/.test(text) || /^\s*-/.test(text);
   text = text
-    .replace(/[,$\s]/g, "")
+    .replace(/[$€£¥,\s]/g, "")
     .replace(/^\(/, "")
     .replace(/\)$/, "")
     .replace(/^\+/, "")
     .replace(/^-/, "");
   const num = Number(text);
-  return isNaN(num) ? null : round2(negative ? -num : num);
+  return Number.isFinite(num) ? round2(negative ? -num : num) : null;
+}
+
+function receiptGrandTotal(receipt) {
+  return toNumber(receipt?.total) ?? toNumber(receipt?.grandTotal);
 }
 
 function normalizeMerchant(merchant) {
@@ -2130,7 +2241,7 @@ function rawDocumentAnnotationObject(annotation) {
 
 function annotationGrandTotalValue(rawAnnotation) {
   if (!rawAnnotation || typeof rawAnnotation !== "object") return null;
-  return toNumber(rawAnnotation.total ?? rawAnnotation.grandTotal);
+  return receiptGrandTotal(rawAnnotation);
 }
 
 function visibleGrandTotalCandidatesFromOcr(ocrText) {
@@ -2143,7 +2254,7 @@ function visibleGrandTotalCandidatesFromOcr(ocrText) {
     .slice(0, 5);
 }
 
-function buildExtractionDiagnostics({ ocrText = "", result = null, parsed = null, reconciliation = null } = {}) {
+function buildExtractionDiagnostics({ ocrText = "", result = null, parsed = null, reconciliation = null, uploadDiagnostics = null } = {}) {
   const rawAnnotation = rawDocumentAnnotationObject(result?.documentAnnotation);
   const annotationGrandTotal = annotationGrandTotalValue(rawAnnotation);
   const normalizedGrandTotal = toNumber(parsed?.grandTotal);
@@ -2173,6 +2284,7 @@ function buildExtractionDiagnostics({ ocrText = "", result = null, parsed = null
     annotationGrandTotal,
     normalizedGrandTotal,
     totalLossLayer,
+    upload: uploadDiagnostics,
   };
 }
 
@@ -2377,6 +2489,7 @@ const SUMMARY_ROLE_PATTERNS = [
   ["fees", /^(?:fee|surcharge)s?\b/],
   ["fees", /^(?:service|delivery|convenience|processing|bag|carryout|pickup)\b/],
   ["payment", /^(?:cash|credit|debit|change|tender(?:ed)?|payment|paid|refund)\b/],
+  ["payment", /^(?:card|bank\s*card)\s*(?:payment|tender(?:ed)?|paid|charge(?:d)?)?\b/],
   ["payment", /^(?:visa|mastercard|master card|amex|american express|discover|diners|jcb|unionpay)\b/],
   ["payment", /^(?:auth|approval|aid|tvr|tsi|rrn|arqc|ref|trace|batch|seq|invoice|terminal|merchant)\b/],
   ["payment", /^(?:number\s+of\s+items|items?\s+sold|item\s+count)\b/],
@@ -2685,13 +2798,22 @@ function receiptItemsReconcile(receipt, tolerance = 0.02) {
   const items = Array.isArray(receipt.items) ? receipt.items : [];
   if (!items.length) return false;
 
-  const itemSum = round2(items.reduce((sum, item) => sum + (item.printedAmount ?? item.amount ?? item.itemValue ?? 0), 0));
-  if (receipt.subtotal != null && Math.abs(itemSum - receipt.subtotal) <= tolerance) return true;
-  if (receipt.grandTotal != null) {
+  const itemSum = round2(items.reduce(
+    (sum, item) => sum + (toNumber(item.printedAmount ?? item.amount ?? item.itemValue) ?? 0),
+    0
+  ));
+  const subtotal = toNumber(receipt.subtotal);
+  const grandTotal = receiptGrandTotal(receipt);
+  if (subtotal != null && Math.abs(itemSum - subtotal) <= tolerance) return true;
+  if (grandTotal != null) {
     const derived = round2(
-      itemSum + (receipt.tax ?? 0) + (receipt.tip ?? 0) + (receipt.fees ?? 0) - (receipt.orderLevelDiscount ?? 0)
+      itemSum
+        + (toNumber(receipt.tax) ?? 0)
+        + (toNumber(receipt.tip) ?? 0)
+        + (toNumber(receipt.fees) ?? 0)
+        - (toNumber(receipt.orderLevelDiscount) ?? 0)
     );
-    if (Math.abs(derived - receipt.grandTotal) <= tolerance) return true;
+    if (Math.abs(derived - grandTotal) <= tolerance) return true;
   }
   return false;
 }
@@ -2717,16 +2839,48 @@ function shouldPreferOcrTextFallback(parsed, fallback) {
   if (receiptItemsReconcile(parsed)) return false;
 
   if (parsedItemCount <= 1 && fallbackItemCount >= 2) return true;
-  if (parsed.grandTotal == null && fallback.grandTotal != null) return true;
+  if (receiptGrandTotal(parsed) == null && receiptGrandTotal(fallback) != null) return true;
   if (fallbackItemCount >= parsedItemCount + 3 && receiptItemsReconcile(fallback)) return true;
   return false;
+}
+
+function mergeStructuredSummaryIntoFallback(parsed, fallback) {
+  if (!parsed || !fallback) return fallback;
+  const structuredTotal = receiptGrandTotal(parsed);
+  const fallbackTotal = receiptGrandTotal(fallback);
+  const structuredFees = Array.isArray(parsed.additionalFees) ? parsed.additionalFees : [];
+
+  return {
+    ...fallback,
+    merchantName: parsed.merchantName ?? parsed.merchant ?? fallback.merchantName ?? fallback.merchant,
+    merchant: parsed.merchantName ?? parsed.merchant ?? fallback.merchant ?? "",
+    receiptDate: parsed.receiptDate ?? fallback.receiptDate ?? null,
+    currency: parsed.currency ?? fallback.currency ?? "USD",
+    subtotal: parsed.subtotal ?? fallback.subtotal ?? null,
+    tax: parsed.tax ?? fallback.tax ?? null,
+    tip: parsed.tip ?? fallback.tip ?? null,
+    fees: parsed.fees ?? fallback.fees ?? null,
+    additionalFees: structuredFees.length ? structuredFees : (fallback.additionalFees || []),
+    additionalFeesTotal: parsed.additionalFeesTotal ?? fallback.additionalFeesTotal ?? null,
+    itemDiscountTotal: parsed.itemDiscountTotal ?? fallback.itemDiscountTotal ?? null,
+    discount: parsed.discount ?? fallback.discount ?? null,
+    orderLevelDiscount: parsed.orderLevelDiscount ?? fallback.orderLevelDiscount ?? null,
+    total: structuredTotal ?? fallbackTotal,
+    grandTotal: structuredTotal ?? fallbackTotal,
+    confidence: parsed.confidence ?? fallback.confidence ?? "medium",
+    notes: [
+      parsed.notes,
+      fallback.notes,
+      "Used Mistral OCR text for item rows while preserving the structured annotation summary.",
+    ].filter(Boolean).join(" "),
+  };
 }
 
 function selectMistralReceiptCandidate(parsed, ocrText, reqId) {
   const fallback = buildReceiptFromMistralOcrText(ocrText, reqId);
   if (shouldPreferOcrTextFallback(parsed, fallback)) {
     return {
-      parsed: fallback,
+      parsed: mergeStructuredSummaryIntoFallback(parsed, fallback),
       extractionSource: parsed ? "mistral_ocr_text_fallback_preferred" : "mistral_ocr_text_fallback",
       fallback,
     };
@@ -2927,7 +3081,7 @@ async function parseFullReceiptResponse(buffer, mimeType, reqId, options = {}) {
   timings.total_ms = Date.now() - startedAt;
 
   return buildApiResponse(
-    { parsed: normalized, ocrText, result, reconciliation, rejected: [], resolutionResult },
+    { parsed: normalized, ocrText, result, reconciliation, rejected: [], resolutionResult, uploadDiagnostics: options.uploadDiagnostics || null },
     timings,
     reqId
   );
@@ -2960,7 +3114,7 @@ function normalizeParsedReceipt(parsed) {
         );
         return {
           name: normalizeItemName(itemName),
-          printedAmount: round2(itemValue),
+          printedAmount: toNumber(itemValue),
           originalAmount: originalItemValue,
           discountApplied: Boolean(item.discountApplied ?? (discountAmount != null && discountAmount > 0)),
           discountAmount,
@@ -2974,7 +3128,12 @@ function normalizeParsedReceipt(parsed) {
           confidence: parsed.confidence || "medium",
         };
       })
-      .filter(item => item.printedAmount >= 0.01),
+      .filter(item => {
+        const name = String(item.name || "").trim();
+        return item.printedAmount >= 0.01
+          && name.length >= 1
+          && (name.length < 2 || !isLikelyNonItemRow(name));
+      }),
     subtotal: toNumber(parsed.subtotal),
     tax: additionalFeeSummary.tax ?? toNumber(parsed.tax),
     tip: additionalFeeSummary.tip ?? toNumber(parsed.tip),
@@ -2984,7 +3143,7 @@ function normalizeParsedReceipt(parsed) {
     itemDiscountTotal: toNumber(parsed.itemDiscountTotal),
     discount: toNumber(parsed.discount),
     orderLevelDiscount: toNumber(parsed.orderLevelDiscount),
-    grandTotal: toNumber(parsed.total ?? parsed.grandTotal),
+    grandTotal: receiptGrandTotal(parsed),
     confidence: parsed.confidence || "medium",
     notes: parsed.notes || null,
   };
@@ -3889,8 +4048,8 @@ function determineParseStatus(reconciliation, normalized, hasRefund, resolutionR
 }
 
 function buildApiResponse(parseResult, timings, reqId) {
-  const { parsed, ocrText, result, reconciliation, rejected, resolutionResult } = parseResult;
-  const extractionDiagnostics = buildExtractionDiagnostics({ ocrText, result, parsed, reconciliation });
+  const { parsed, ocrText, result, reconciliation, rejected, resolutionResult, uploadDiagnostics } = parseResult;
+  const extractionDiagnostics = buildExtractionDiagnostics({ ocrText, result, parsed, reconciliation, uploadDiagnostics });
 
   if (!parsed) {
     return {
@@ -4123,6 +4282,7 @@ app.post("/parse-receipt-staged", requireAppAuth, async (req, res) => {
       localHints = null,
       localParseResult = null,
       localCandidates = null,
+      uploadDiagnostics: clientUploadDiagnostics = null,
     } = req.body || {};
     if (!imageBase64) {
       return res.status(400).json({ ok: false, request_id: reqId, error: { code: "MISSING_IMAGE", message: "Missing imageBase64 in request body" } });
@@ -4141,6 +4301,8 @@ app.post("/parse-receipt-staged", requireAppAuth, async (req, res) => {
 
     const safeMimeType = uploadValidation.mimeType;
     const hash = fileHash(buffer);
+    const uploadDiagnostics = buildUploadDiagnostics(buffer, mimeType, safeMimeType, clientUploadDiagnostics);
+    logUploadDiagnostics(reqId, uploadDiagnostics);
     const decodeMs = Date.now() - decodeStart;
     const cached = getCachedParse(hash, "receipt");
     if (cached) {
@@ -4166,6 +4328,7 @@ app.post("/parse-receipt-staged", requireAppAuth, async (req, res) => {
     const job = {
       requestId: reqId,
       hash,
+      uploadDiagnostics,
       status: "itemizing",
       createdAt: Date.now(),
       quickTotal: null,
@@ -4200,6 +4363,7 @@ app.post("/parse-receipt-staged", requireAppAuth, async (req, res) => {
       localHints,
       localParseResult,
       localCandidates,
+      uploadDiagnostics,
     })
       .then(result => {
         job.result = result;
@@ -4345,6 +4509,7 @@ app.post("/parse-receipt", requireAppAuth, async (req, res) => {
       localHints = null,
       localParseResult = null,
       localCandidates = null,
+      uploadDiagnostics: clientUploadDiagnostics = null,
     } = req.body || {};
 
     trackAnalyticsEvent({
@@ -4398,7 +4563,9 @@ app.post("/parse-receipt", requireAppAuth, async (req, res) => {
     const safeMimeType = uploadValidation.mimeType;
     timings.decode_ms = Date.now() - decodeStart;
     const hash = fileHash(buffer);
+    const uploadDiagnostics = buildUploadDiagnostics(buffer, mimeType, safeMimeType, clientUploadDiagnostics);
     console.log(`[${reqId}] Image size: ${(buffer.length / 1024).toFixed(2)} KB`);
+    logUploadDiagnostics(reqId, uploadDiagnostics);
     trackAnalyticsEvent({
       ...analyticsContext,
       event_name: "receipt_upload_validated",
@@ -4482,6 +4649,7 @@ app.post("/parse-receipt", requireAppAuth, async (req, res) => {
       localHints,
       localParseResult,
       localCandidates,
+      uploadDiagnostics,
     });
     const candidateSelection = selectMistralReceiptCandidate(parsed, ocrText, reqId);
     timings.ocr_ms = Date.now() - ocrStart;
@@ -4622,7 +4790,7 @@ app.post("/parse-receipt", requireAppAuth, async (req, res) => {
     console.log(`[${reqId}]   - Total: ${timings.total_ms}ms`);
 
     const response = buildApiResponse(
-      { parsed: normalized, ocrText, result, reconciliation, rejected, resolutionResult },
+      { parsed: normalized, ocrText, result, reconciliation, rejected, resolutionResult, uploadDiagnostics },
       timings,
       reqId
     );
@@ -5295,11 +5463,16 @@ if (process.env.NODE_ENV !== "test") {
 export {
   app,
   arbitrateReceiptCandidates,
+  buildExtractionDiagnostics,
   buildReceiptFromMistralOcrText,
+  buildUploadDiagnostics,
+  callMistralOCR,
   compactAppleOcrText,
   compactLocalParseResult,
+  detectMimeType,
   extractReceiptMoneyEvidence,
   extractFallbackBankTransactionsFromOcrText,
+  fileHash,
   hashIdentifier,
   isLikelyNonItemRow,
   isLikelySuggestedTipRowText,
