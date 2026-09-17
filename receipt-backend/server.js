@@ -1657,6 +1657,59 @@ function receiptGrandTotal(receipt) {
   return toNumber(receipt?.total) ?? toNumber(receipt?.grandTotal);
 }
 
+function salvageMistralReceiptAnnotation(annotation) {
+  const raw = rawDocumentAnnotationObject(annotation);
+  if (!raw || Array.isArray(raw) || typeof raw !== "object") return null;
+
+  const items = Array.isArray(raw.items)
+    ? raw.items.filter(item => item && typeof item === "object" && !Array.isArray(item))
+    : [];
+  const additionalFees = Array.isArray(raw.additionalFees)
+    ? raw.additionalFees.filter(fee => fee && typeof fee === "object" && !Array.isArray(fee))
+    : [];
+  const merchantName = typeof raw.merchantName === "string"
+    ? raw.merchantName
+    : typeof raw.merchant === "string"
+      ? raw.merchant
+      : "";
+  const grandTotal = receiptGrandTotal(raw);
+
+  if (!merchantName && items.length === 0 && grandTotal == null) return null;
+
+  return {
+    ...raw,
+    merchantName,
+    items,
+    additionalFees,
+    total: grandTotal,
+    grandTotal,
+    confidence: ["high", "medium", "low"].includes(raw.confidence) ? raw.confidence : "medium",
+    notes: [
+      typeof raw.notes === "string" ? raw.notes : null,
+      "Recovered valid fields from a partially schema-invalid Mistral annotation.",
+    ].filter(Boolean).join(" "),
+    annotationValidation: "salvaged",
+  };
+}
+
+function preserveAnnotationGrandTotal(receipt, annotation, reqId = null) {
+  if (!receipt || receiptGrandTotal(receipt) != null) return receipt;
+  const annotationTotal = annotationGrandTotalValue(rawDocumentAnnotationObject(annotation));
+  if (!(annotationTotal > 0)) return receipt;
+
+  if (reqId) {
+    console.log(`[${reqId}] Restored Mistral annotation total $${annotationTotal.toFixed(2)} after downstream normalization dropped it`);
+  }
+  return {
+    ...receipt,
+    grandTotal: annotationTotal,
+    notes: [
+      receipt.notes,
+      "Preserved the Mistral annotation total through downstream normalization.",
+    ].filter(Boolean).join(" "),
+  };
+}
+
 function normalizeMerchant(merchant) {
   if (!merchant) return "";
   return merchant
@@ -2971,6 +3024,10 @@ async function callMistralOCR(imageBuffer, mimeType, reqId, options = {}) {
     console.log(`[${reqId}] ✓ Structured extraction successful`);
   } catch (err) {
     console.log(`[${reqId}] ⚠️ Structured extraction validation failed: ${err.message}`);
+    parsed = salvageMistralReceiptAnnotation(ocr.documentAnnotation);
+    if (parsed) {
+      console.log(`[${reqId}] ✓ Salvaged Mistral annotation after schema validation failure (items=${parsed.items.length}, total=${parsed.grandTotal ?? "null"})`);
+    }
   }
 
   return { parsed, ocrText: ocr.ocrText, result: ocr.result, ocr };
@@ -3061,7 +3118,11 @@ async function parseFullReceiptResponse(buffer, mimeType, reqId, options = {}) {
     resolutionResult = resolveFinancialContradictions(normalized, reqId, {
       ocrText,
     });
-    normalized = resolutionResult.receipt;
+    normalized = preserveAnnotationGrandTotal(
+      resolutionResult.receipt,
+      result?.documentAnnotation,
+      reqId
+    );
     timings.contradiction_resolution_ms = Date.now() - contradictionStart;
     resolutionResult.receipt = normalized;
   }
@@ -4740,7 +4801,11 @@ app.post("/parse-receipt", requireAppAuth, async (req, res) => {
       resolutionResult = resolveFinancialContradictions(normalized, reqId, {
         ocrText,
       });
-      normalized = resolutionResult.receipt;
+      normalized = preserveAnnotationGrandTotal(
+        resolutionResult.receipt,
+        result?.documentAnnotation,
+        reqId
+      );
       timings.contradiction_resolution_ms = Date.now() - contradictionStart;
       resolutionResult.receipt = normalized;
     }
@@ -5478,11 +5543,13 @@ export {
   isLikelySuggestedTipRowText,
   normalizeAnalyticsFailureReason,
   normalizeParsedReceipt,
+  preserveAnnotationGrandTotal,
   receiptItemsReconcile,
   reconcileReceipt,
   resolveFinancialContradictions,
   sanitizeAnalyticsProperties,
   safeString,
+  salvageMistralReceiptAnnotation,
   selectMistralReceiptCandidate,
   shouldPreferOcrTextFallback,
   summarizeAnalytics,
