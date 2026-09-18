@@ -1,5 +1,6 @@
 import express from "express";
 import cors from "cors";
+import multer from "multer";
 import dotenv from "dotenv";
 import fs from "fs";
 import path from "path";
@@ -32,6 +33,15 @@ const JSON_BODY_LIMIT = process.env.JSON_BODY_LIMIT || "12mb";
 app.use(express.json({ limit: JSON_BODY_LIMIT }));
 
 const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES || 8 * 1024 * 1024);
+const receiptMultipartUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: MAX_UPLOAD_BYTES,
+    files: 1,
+    fields: 32,
+    fieldSize: 2 * 1024 * 1024,
+  },
+});
 const MAX_PDF_PAGES = Number(process.env.MAX_PDF_PAGES || 12);
 const OCR_LOW_CONFIDENCE_THRESHOLD = Number(process.env.OCR_LOW_CONFIDENCE_THRESHOLD || 0.75);
 const ALLOWED_MIME_TYPES = new Set([
@@ -57,10 +67,6 @@ const MISTRAL_OCR_TIMEOUT_MS = Number(
 );
 const QUICK_TOTAL_TIMEOUT_MS = Number(process.env.QUICK_TOTAL_TIMEOUT_MS || 5000);
 const ENABLE_STAGED_QUICK_TOTAL = process.env.ENABLE_STAGED_QUICK_TOTAL === "true";
-const RECEIPT_STAGED_TARGET_MS = Number(process.env.RECEIPT_STAGED_TARGET_MS || 5000);
-const STAGED_FIRST_RESPONSE_TIMEOUT_MS = Number(
-  process.env.STAGED_FIRST_RESPONSE_TIMEOUT_MS || Math.max(250, RECEIPT_STAGED_TARGET_MS - 500)
-);
 const ENABLE_MISTRAL_WORD_CONFIDENCE = process.env.ENABLE_MISTRAL_WORD_CONFIDENCE === "true";
 const ENABLE_MISTRAL_OCR_DEBUG =
   process.env.ENABLE_MISTRAL_OCR_DEBUG === "true" || ENABLE_DEBUG_RESPONSE;
@@ -330,6 +336,136 @@ function fileHash(buffer) {
   return crypto.createHash("sha256").update(buffer).digest("hex");
 }
 
+class ReceiptUploadError extends Error {
+  constructor(status, code, message) {
+    super(message);
+    this.name = "ReceiptUploadError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+function receiptMultipartMiddleware(req, res, next) {
+  if (!req.is("multipart/form-data")) {
+    req.receiptMultipartParseMs = 0;
+    return next();
+  }
+
+  const startedAt = Date.now();
+  receiptMultipartUpload.single("file")(req, res, error => {
+    req.receiptMultipartParseMs = Date.now() - startedAt;
+    if (!error) return next();
+
+    const oversized = error instanceof multer.MulterError && error.code === "LIMIT_FILE_SIZE";
+    const status = oversized ? 413 : 400;
+    const code = oversized ? "FILE_TOO_LARGE" : "MALFORMED_MULTIPART_UPLOAD";
+    const message = oversized
+      ? "This file is too large to parse."
+      : `Malformed multipart receipt upload: ${error.message}`;
+    return res.status(status).json({ ok: false, error: { code, message } });
+  });
+}
+
+function parseMultipartJsonField(body, fieldName, fallback = null) {
+  const value = body?.[fieldName];
+  if (value == null || value === "") return fallback;
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    throw new ReceiptUploadError(
+      400,
+      "MALFORMED_MULTIPART_FIELD",
+      `Multipart field ${fieldName} must contain valid JSON.`
+    );
+  }
+}
+
+function parseOptionalInteger(value) {
+  if (value == null || value === "") return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function resolveReceiptUpload(req) {
+  const body = req.body || {};
+  const isMultipart = Boolean(req.file);
+  const decodeStartedAt = Date.now();
+  let buffer;
+
+  if (isMultipart) {
+    buffer = req.file.buffer;
+  } else if (body.imageBase64) {
+    buffer = decodeBase64Payload(body.imageBase64);
+  } else {
+    throw new ReceiptUploadError(
+      400,
+      "MISSING_IMAGE",
+      isMultipart || req.is("multipart/form-data")
+        ? "Missing multipart file field named file."
+        : "Missing imageBase64 in request body."
+    );
+  }
+
+  const transport = isMultipart ? "multipart_binary" : "legacy_base64_json";
+  const imageDecodeMs = isMultipart ? 0 : Date.now() - decodeStartedAt;
+  const multipartParseMs = isMultipart ? Number(req.receiptMultipartParseMs || 0) : 0;
+  const requestParseMs = isMultipart ? multipartParseMs : imageDecodeMs;
+  const clientUploadDiagnostics = isMultipart
+    ? parseMultipartJsonField(body, "uploadDiagnostics")
+    : body.uploadDiagnostics ?? null;
+  const localHints = isMultipart ? parseMultipartJsonField(body, "localHints") : body.localHints ?? null;
+  const localParseResult = isMultipart
+    ? parseMultipartJsonField(body, "localParseResult")
+    : body.localParseResult ?? null;
+  const localCandidates = isMultipart
+    ? parseMultipartJsonField(body, "localCandidates")
+    : body.localCandidates ?? null;
+  const diagnosticsFingerprint = clientUploadDiagnostics?.upload || clientUploadDiagnostics || {};
+  const clientSha256 = String(body.clientSha256 || diagnosticsFingerprint.sha256 || "").trim().toLowerCase() || null;
+  const clientByteCount = parseOptionalInteger(body.clientByteCount ?? diagnosticsFingerprint.byteCount);
+  const serverSha256 = fileHash(buffer);
+  const shaMatches = clientSha256 == null || clientSha256 === serverSha256;
+  const byteCountMatches = clientByteCount == null || clientByteCount === buffer.length;
+
+  if (!shaMatches || !byteCountMatches) {
+    throw new ReceiptUploadError(
+      400,
+      "UPLOAD_PARITY_MISMATCH",
+      `Receipt upload bytes changed in transport (client ${clientByteCount ?? "unknown"}B/${clientSha256 || "no_sha"}, server ${buffer.length}B/${serverSha256}).`
+    );
+  }
+
+  const contentLength = parseOptionalInteger(req.get?.("content-length"));
+  const legacyJsonBodyBytes = isMultipart ? 0 : Buffer.byteLength(JSON.stringify(body), "utf8");
+  return {
+    buffer,
+    mimeType: body.mimeType || req.file?.mimetype || "image/jpeg",
+    sourceType: body.sourceType || body.uploadSource || "unknown",
+    mode: body.mode || body.processingMode || "unknown",
+    appleOcrText: body.appleOcrText || "",
+    localHints,
+    localParseResult,
+    localCandidates,
+    clientUploadDiagnostics,
+    uploadTransport: transport,
+    clientSha256,
+    clientByteCount,
+    serverSha256,
+    requestMetrics: {
+      backend_request_parse_ms: requestParseMs,
+      backend_image_decode_ms: imageDecodeMs,
+      backend_multipart_parse_ms: multipartParseMs,
+      raw_image_bytes: buffer.length,
+      legacy_json_body_bytes: legacyJsonBodyBytes,
+      multipart_request_bytes: isMultipart ? contentLength : 0,
+      client_image_prepare_ms: parseOptionalInteger(body.clientImagePrepareMs),
+      client_base64_encode_ms: parseOptionalInteger(body.clientBase64EncodeMs),
+      client_request_build_ms: parseOptionalInteger(body.clientRequestBuildMs),
+    },
+  };
+}
+
 function parseJpegExifOrientation(segment) {
   if (!segment || segment.length < 14) return null;
   if (segment.subarray(0, 6).toString("latin1") !== "Exif\0\0") return null;
@@ -397,13 +533,32 @@ function imageMetadataFromBuffer(buffer, mimeType) {
   return { width: null, height: null, orientation: null };
 }
 
-function buildUploadDiagnostics(buffer, claimedMimeType, detectedMimeType, clientDiagnostics = null) {
+function buildUploadDiagnostics(
+  buffer,
+  claimedMimeType,
+  detectedMimeType,
+  clientDiagnostics = null,
+  transportDiagnostics = {}
+) {
   const serverImage = imageMetadataFromBuffer(buffer, detectedMimeType);
+  const serverSha256 = transportDiagnostics.serverSha256 || fileHash(buffer);
+  const clientSha256 = transportDiagnostics.clientSha256 || clientDiagnostics?.upload?.sha256 || null;
+  const clientByteCount = transportDiagnostics.clientByteCount ?? clientDiagnostics?.upload?.byteCount ?? null;
   return {
+    upload_transport: transportDiagnostics.uploadTransport || "legacy_base64_json",
+    clientSha256,
+    serverSha256,
+    clientByteCount,
+    serverByteCount: buffer?.length || 0,
+    parity: {
+      sha256Matches: clientSha256 == null || String(clientSha256).toLowerCase() === serverSha256,
+      byteCountMatches: clientByteCount == null || Number(clientByteCount) === buffer.length,
+    },
+    requestMetrics: transportDiagnostics.requestMetrics || null,
     client: clientDiagnostics || null,
     server: {
       byteCount: buffer?.length || 0,
-      sha256: fileHash(buffer),
+      sha256: serverSha256,
       mimeTypeClaimed: claimedMimeType || null,
       mimeTypeDetected: detectedMimeType || null,
       width: serverImage.width,
@@ -422,6 +577,14 @@ function uploadDiagnosticsSummary(diagnostics) {
 }
 
 function logUploadDiagnostics(reqId, diagnostics) {
+  console.log(`[${reqId}] Upload transport=${diagnostics?.upload_transport || "unknown"} parity=${JSON.stringify({
+    clientByteCount: diagnostics?.clientByteCount ?? null,
+    serverByteCount: diagnostics?.serverByteCount ?? null,
+    clientSha256: diagnostics?.clientSha256 ?? null,
+    serverSha256: diagnostics?.serverSha256 ?? null,
+    sha256Matches: diagnostics?.parity?.sha256Matches ?? null,
+    byteCountMatches: diagnostics?.parity?.byteCountMatches ?? null,
+  })}`);
   console.log(`[${reqId}] Upload diagnostics server=${uploadDiagnosticsSummary(diagnostics)}`);
   if (diagnostics?.client) {
     const clientUpload = diagnostics.client.upload || diagnostics.client;
@@ -2943,16 +3106,20 @@ async function runMistralOcr({
 }) {
   console.log(`[${reqId}] Calling Mistral OCR (${mimeType})...`);
 
+  const requestPrepareStartedAt = Date.now();
   const ocrRequest = {
     model: MISTRAL_OCR_MODEL,
     document: buildMistralDocument(buffer, mimeType),
     documentAnnotationFormat,
     documentAnnotationPrompt,
-    includeBlocks: true,
+    // Markdown plus documentAnnotation are the only OCR outputs consumed by
+    // the receipt pipeline. Paragraph geometry adds payload and provider work.
+    includeBlocks: false,
   };
   if (ENABLE_MISTRAL_WORD_CONFIDENCE) {
     ocrRequest.confidenceScoresGranularity = "word";
   }
+  const requestPrepareMs = Date.now() - requestPrepareStartedAt;
 
   // `timeoutMs` gives the SDK an AbortSignal, so an expired request actually
   // releases the socket. `withTimeout` alone could not do that — it raced a
@@ -2989,6 +3156,7 @@ async function runMistralOcr({
       : [],
     lowConfidenceFields: [],
     documentAnnotation: result.documentAnnotation || null,
+    requestPrepareMs,
     result,
   };
 }
@@ -3063,14 +3231,18 @@ async function parseFullReceiptResponse(buffer, mimeType, reqId, options = {}) {
     contradiction_resolution_ms: 0,
     reconciliation_ms: 0,
     total_ms: 0,
+    backend_mistral_request_prepare_ms: 0,
+    backend_postprocess_ms: 0,
+    total_until_final_ms: 0,
   };
 
   const ocrStart = Date.now();
-  let { parsed, ocrText, result } = await callMistralOCR(buffer, mimeType, reqId, options);
+  let { parsed, ocrText, result, ocr } = await callMistralOCR(buffer, mimeType, reqId, options);
   const candidateSelection = selectMistralReceiptCandidate(parsed, ocrText, reqId);
   parsed = candidateSelection.parsed;
   timings.ocr_ms = Date.now() - ocrStart;
   timings.mistral_ocr_ms = timings.ocr_ms;
+  timings.backend_mistral_request_prepare_ms = ocr?.requestPrepareMs || 0;
 
   let normalized = null;
   let resolutionResult = {
@@ -3124,6 +3296,8 @@ async function parseFullReceiptResponse(buffer, mimeType, reqId, options = {}) {
   };
   timings.reconciliation_ms = Date.now() - reconciliationStart;
   timings.total_ms = Date.now() - startedAt;
+  timings.backend_postprocess_ms = Math.max(0, timings.total_ms - timings.ocr_ms);
+  timings.total_until_final_ms = timings.total_ms;
 
   return buildApiResponse(
     { parsed: normalized, ocrText, result, reconciliation, rejected: [], resolutionResult, uploadDiagnostics: options.uploadDiagnostics || null },
@@ -3988,10 +4162,6 @@ function withTimeout(promise, timeoutMs, label) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
 }
 
-function delayMs(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 function fallbackNameNormalization(receipt) {
   return {
     ...receipt,
@@ -4421,30 +4591,30 @@ function serializeStagedReceiptJob(job, reqId) {
   };
 }
 
-app.post("/parse-receipt-staged", requireAppAuth, async (req, res) => {
+app.post("/parse-receipt-staged", requireAppAuth, receiptMultipartMiddleware, async (req, res) => {
   cleanupStagedReceiptJobs();
   const reqId = requestIdFrom(req);
   const startedAt = Date.now();
   const analyticsContext = analyticsContextFromRequest(req, reqId);
 
   try {
+    const upload = resolveReceiptUpload(req);
     const {
-      imageBase64,
-      mimeType = "image/jpeg",
-      sourceType = "unknown",
-      mode = "staged",
-      appleOcrText = "",
-      localHints = null,
-      localParseResult = null,
-      localCandidates = null,
-      uploadDiagnostics: clientUploadDiagnostics = null,
-    } = req.body || {};
-    if (!imageBase64) {
-      return res.status(400).json({ ok: false, request_id: reqId, error: { code: "MISSING_IMAGE", message: "Missing imageBase64 in request body" } });
-    }
-
-    const decodeStart = Date.now();
-    const buffer = decodeBase64Payload(imageBase64);
+      buffer,
+      mimeType,
+      sourceType,
+      appleOcrText,
+      localHints,
+      localParseResult,
+      localCandidates,
+      clientUploadDiagnostics,
+      uploadTransport,
+      clientSha256,
+      clientByteCount,
+      serverSha256,
+      requestMetrics,
+    } = upload;
+    const mode = upload.mode === "unknown" ? "staged" : upload.mode;
     const uploadValidation = validateUploadBuffer(buffer, mimeType);
     if (!uploadValidation.ok) {
       return res.status(uploadValidation.status).json({
@@ -4456,9 +4626,15 @@ app.post("/parse-receipt-staged", requireAppAuth, async (req, res) => {
 
     const safeMimeType = uploadValidation.mimeType;
     const hash = fileHash(buffer);
-    const uploadDiagnostics = buildUploadDiagnostics(buffer, mimeType, safeMimeType, clientUploadDiagnostics);
+    const uploadDiagnostics = buildUploadDiagnostics(buffer, mimeType, safeMimeType, clientUploadDiagnostics, {
+      uploadTransport,
+      clientSha256,
+      clientByteCount,
+      serverSha256,
+      requestMetrics,
+    });
     logUploadDiagnostics(reqId, uploadDiagnostics);
-    const decodeMs = Date.now() - decodeStart;
+    const decodeMs = requestMetrics.backend_image_decode_ms;
     const cached = getCachedParse(hash, "receipt");
     if (cached) {
       return res.json({
@@ -4468,7 +4644,13 @@ app.post("/parse-receipt-staged", requireAppAuth, async (req, res) => {
         itemizationStatus: "complete",
         quickTotal: getQuickTotalFromFullReceipt(cached),
         result: cached,
-        timings: { decode_ms: decodeMs, total_ms: Date.now() - startedAt, cache_hit: true },
+        timings: {
+          decode_ms: decodeMs,
+          ...requestMetrics,
+          total_ms: Date.now() - startedAt,
+          total_until_final_ms: Date.now() - startedAt,
+          cache_hit: true,
+        },
       });
     }
 
@@ -4491,8 +4673,12 @@ app.post("/parse-receipt-staged", requireAppAuth, async (req, res) => {
       error: null,
       timings: {
         decode_ms: decodeMs,
+        ...requestMetrics,
         quick_total_ms: 0,
         itemization_ms: 0,
+        backend_mistral_request_prepare_ms: 0,
+        mistral_ocr_ms: 0,
+        backend_postprocess_ms: 0,
         cache_hit: false,
       },
     };
@@ -4505,6 +4691,7 @@ app.post("/parse-receipt-staged", requireAppAuth, async (req, res) => {
       properties: {
         request_id: reqId,
         upload_source: sourceType,
+        upload_transport: uploadTransport,
         file_type: safeMimeType,
         image_size_bytes: buffer.length,
         mode,
@@ -4513,7 +4700,7 @@ app.post("/parse-receipt-staged", requireAppAuth, async (req, res) => {
     });
 
     const itemizationStartedAt = Date.now();
-    const itemizationPromise = parseFullReceiptResponse(buffer, safeMimeType, `${reqId}_items`, {
+    parseFullReceiptResponse(buffer, safeMimeType, `${reqId}_items`, {
       appleOcrText,
       localHints,
       localParseResult,
@@ -4525,6 +4712,10 @@ app.post("/parse-receipt-staged", requireAppAuth, async (req, res) => {
         job.quickTotal = job.quickTotal || getQuickTotalFromFullReceipt(result);
         job.status = "complete";
         job.timings.itemization_ms = Date.now() - itemizationStartedAt;
+        job.timings.backend_mistral_request_prepare_ms = result?.timings?.backend_mistral_request_prepare_ms || 0;
+        job.timings.mistral_ocr_ms = result?.timings?.mistral_ocr_ms || 0;
+        job.timings.backend_postprocess_ms = result?.timings?.backend_postprocess_ms || 0;
+        job.timings.total_until_final_ms = Date.now() - startedAt;
         setCachedParse(hash, "receipt", result);
         trackAnalyticsEvent({
           ...analyticsContext,
@@ -4546,6 +4737,7 @@ app.post("/parse-receipt-staged", requireAppAuth, async (req, res) => {
           message: safeString(error?.message || "Receipt itemization failed."),
         };
         job.timings.itemization_ms = Date.now() - itemizationStartedAt;
+        job.timings.total_until_final_ms = Date.now() - startedAt;
         trackAnalyticsEvent({
           ...analyticsContext,
           event_name: "receipt_parse_failed",
@@ -4558,11 +4750,6 @@ app.post("/parse-receipt-staged", requireAppAuth, async (req, res) => {
           },
         });
       });
-
-    const firstResponseWaiters = [
-      itemizationPromise.catch(() => undefined),
-      delayMs(STAGED_FIRST_RESPONSE_TIMEOUT_MS),
-    ];
 
     if (ENABLE_STAGED_QUICK_TOTAL) {
       const quickStartedAt = Date.now();
@@ -4597,18 +4784,20 @@ app.post("/parse-receipt-staged", requireAppAuth, async (req, res) => {
             },
           });
         });
-      firstResponseWaiters.push(quickPromise.catch(() => undefined));
+      // Quick-total extraction is optional background work. The client already
+      // has local provisional values and should never wait here for another model.
+      void quickPromise;
     }
 
-    await Promise.race(firstResponseWaiters);
-
+    job.timings.staged_initial_response_ms = Date.now() - startedAt;
     const payload = serializeStagedReceiptJob(job, reqId);
     payload.timings.total_ms = Date.now() - startedAt;
     if (job.status === "complete") return res.json(payload);
     if (job.status === "failed") return res.status(500).json(payload);
     return res.status(202).json(payload);
   } catch (error) {
-    return res.status(500).json({
+    const status = error instanceof ReceiptUploadError ? error.status : 500;
+    return res.status(status).json({
       ok: false,
       request_id: reqId,
       error: {
@@ -4633,13 +4822,21 @@ app.get("/parse-receipt-staged/:requestId", requireAppAuth, (req, res) => {
   return res.status(job.status === "complete" ? 200 : 202).json(serializeStagedReceiptJob(job, req.params.requestId));
 });
 
-app.post("/parse-receipt", requireAppAuth, async (req, res) => {
+app.post("/parse-receipt", requireAppAuth, receiptMultipartMiddleware, async (req, res) => {
   const reqId = requestIdFrom(req);
   const startedAt = Date.now();
   let tempImagePath = null;
   const analyticsContext = analyticsContextFromRequest(req, reqId);
   const timings = {
     decode_ms: 0,
+    backend_request_parse_ms: 0,
+    backend_image_decode_ms: 0,
+    backend_multipart_parse_ms: 0,
+    backend_mistral_request_prepare_ms: 0,
+    backend_postprocess_ms: 0,
+    raw_image_bytes: 0,
+    legacy_json_body_bytes: 0,
+    multipart_request_bytes: 0,
     temp_file_write_ms: 0,
     ocr_ms: 0,
     mistral_ocr_ms: 0,
@@ -4655,17 +4852,24 @@ app.post("/parse-receipt", requireAppAuth, async (req, res) => {
   console.log("=".repeat(80));
 
   try {
+    const upload = resolveReceiptUpload(req);
     const {
-      imageBase64,
-      mimeType = "image/jpeg",
-      sourceType = "unknown",
-      mode = "unknown",
-      appleOcrText = "",
-      localHints = null,
-      localParseResult = null,
-      localCandidates = null,
-      uploadDiagnostics: clientUploadDiagnostics = null,
-    } = req.body || {};
+      buffer,
+      mimeType,
+      sourceType,
+      mode,
+      appleOcrText,
+      localHints,
+      localParseResult,
+      localCandidates,
+      clientUploadDiagnostics,
+      uploadTransport,
+      clientSha256,
+      clientByteCount,
+      serverSha256,
+      requestMetrics,
+    } = upload;
+    Object.assign(timings, requestMetrics, { decode_ms: requestMetrics.backend_image_decode_ms });
 
     trackAnalyticsEvent({
       ...analyticsContext,
@@ -4673,30 +4877,13 @@ app.post("/parse-receipt", requireAppAuth, async (req, res) => {
       properties: {
         request_id: reqId,
         upload_source: sourceType,
+        upload_transport: uploadTransport,
         file_type: mimeType,
         expected_document_type: "receipt",
         mode,
       },
     });
 
-    if (!imageBase64) {
-      console.log(`[${reqId}] ✗ Missing imageBase64`);
-      trackAnalyticsEvent({
-        ...analyticsContext,
-        event_name: "receipt_upload_rejected",
-        properties: { request_id: reqId, failure_reason: "invalid_document", error_code: "MISSING_IMAGE" },
-      });
-      return res.status(400).json({ error: "Missing imageBase64 in request body" });
-    }
-
-    const decodeStart = Date.now();
-    let base64Data = imageBase64;
-    const idx = base64Data.indexOf("base64,");
-    if (idx >= 0) {
-      base64Data = base64Data.slice(idx + 7);
-    }
-
-    const buffer = Buffer.from(base64Data, "base64");
     const uploadValidation = validateUploadBuffer(buffer, mimeType);
     if (!uploadValidation.ok) {
       trackAnalyticsEvent({
@@ -4716,9 +4903,14 @@ app.post("/parse-receipt", requireAppAuth, async (req, res) => {
       });
     }
     const safeMimeType = uploadValidation.mimeType;
-    timings.decode_ms = Date.now() - decodeStart;
     const hash = fileHash(buffer);
-    const uploadDiagnostics = buildUploadDiagnostics(buffer, mimeType, safeMimeType, clientUploadDiagnostics);
+    const uploadDiagnostics = buildUploadDiagnostics(buffer, mimeType, safeMimeType, clientUploadDiagnostics, {
+      uploadTransport,
+      clientSha256,
+      clientByteCount,
+      serverSha256,
+      requestMetrics,
+    });
     console.log(`[${reqId}] Image size: ${(buffer.length / 1024).toFixed(2)} KB`);
     logUploadDiagnostics(reqId, uploadDiagnostics);
     trackAnalyticsEvent({
@@ -4727,6 +4919,7 @@ app.post("/parse-receipt", requireAppAuth, async (req, res) => {
       properties: {
         request_id: reqId,
         upload_source: sourceType,
+        upload_transport: uploadTransport,
         file_type: safeMimeType,
         image_size_bytes: buffer.length,
         mode,
@@ -4799,7 +4992,7 @@ app.post("/parse-receipt", requireAppAuth, async (req, res) => {
       event_name: "receipt_ocr_started",
       properties: { request_id: reqId, ocr_provider: "mistral", file_type: safeMimeType, mode },
     });
-    let { parsed, ocrText, result } = await callMistralOCR(buffer, safeMimeType, reqId, {
+    let { parsed, ocrText, result, ocr } = await callMistralOCR(buffer, safeMimeType, reqId, {
       appleOcrText,
       localHints,
       localParseResult,
@@ -4809,6 +5002,7 @@ app.post("/parse-receipt", requireAppAuth, async (req, res) => {
     const candidateSelection = selectMistralReceiptCandidate(parsed, ocrText, reqId);
     timings.ocr_ms = Date.now() - ocrStart;
     timings.mistral_ocr_ms = timings.ocr_ms;
+    timings.backend_mistral_request_prepare_ms = ocr?.requestPrepareMs || 0;
     trackAnalyticsEvent({
       ...analyticsContext,
       event_name: "receipt_ocr_completed",
@@ -4918,6 +5112,8 @@ app.post("/parse-receipt", requireAppAuth, async (req, res) => {
     timings.reconciliation_ms = Date.now() - reconciliationStart;
 
     timings.total_ms = Date.now() - startedAt;
+    timings.backend_postprocess_ms = Math.max(0, timings.total_ms - timings.ocr_ms - timings.backend_request_parse_ms);
+    timings.total_until_final_ms = timings.total_ms;
 
     // Enhanced logging
     console.log(`[${reqId}] Final Results:`);
@@ -4986,7 +5182,9 @@ app.post("/parse-receipt", requireAppAuth, async (req, res) => {
   } catch (error) {
     timings.total_ms = Date.now() - startedAt;
     console.error(`[${reqId}] ✗ ERROR:`, error);
-    const statusCode = error?.code === "MISTRAL_TIMEOUT" ? 504 : 500;
+    const statusCode = error instanceof ReceiptUploadError
+      ? error.status
+      : error?.code === "MISTRAL_TIMEOUT" ? 504 : 500;
     trackAnalyticsEvent({
       ...analyticsContext,
       event_name: error?.message?.toLowerCase().includes("ocr") ? "receipt_ocr_failed" : "receipt_parse_failed",
@@ -5623,6 +5821,7 @@ export {
   app,
   arbitrateReceiptCandidates,
   buildExtractionDiagnostics,
+  buildMistralDocument,
   buildReceiptFromMistralOcrText,
   buildUploadDiagnostics,
   callMistralOCR,
@@ -5638,15 +5837,19 @@ export {
   isLikelySuggestedTipRowText,
   normalizeAnalyticsFailureReason,
   normalizeParsedReceipt,
+  receiptMultipartMiddleware,
   preserveAnnotationGrandTotal,
   receiptItemsReconcile,
   reconcileReceipt,
   resolveFinancialContradictions,
+  resolveReceiptUpload,
   sanitizeAnalyticsProperties,
   safeString,
   salvageMistralReceiptAnnotation,
   selectMistralReceiptCandidate,
+  setCachedParse,
   shouldPreferOcrTextFallback,
   summarizeAnalytics,
   summaryRoleForLine,
+  validateUploadBuffer,
 };
