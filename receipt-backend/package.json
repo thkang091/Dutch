@@ -5,6 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "mistral:direct": "node scripts/mistral-direct-receipt.js",
     "test": "NODE_ENV=test APP_BEARER_TOKEN=test MISTRAL_API_KEY=test ANALYTICS_EVENTS_FILE=/tmp/dutchie_analytics_test.jsonl node --test test/*.test.js"
   },
   "engines": {
