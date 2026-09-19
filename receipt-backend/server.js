@@ -387,6 +387,12 @@ function parseOptionalInteger(value) {
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
 }
 
+function parseOptionalBoolean(value, fallback = false) {
+  if (value == null || value === "") return fallback;
+  if (typeof value === "boolean") return value;
+  return /^(?:1|true|yes|on)$/i.test(String(value).trim());
+}
+
 function resolveReceiptUpload(req) {
   const body = req.body || {};
   const isMultipart = Boolean(req.file);
@@ -443,6 +449,7 @@ function resolveReceiptUpload(req) {
     mimeType: body.mimeType || req.file?.mimetype || "image/jpeg",
     sourceType: body.sourceType || body.uploadSource || "unknown",
     mode: body.mode || body.processingMode || "unknown",
+    needsQuickTotal: parseOptionalBoolean(body.needsQuickTotal),
     appleOcrText: body.appleOcrText || "",
     localHints,
     localParseResult,
@@ -649,6 +656,8 @@ function getQuickTotalFromFullReceipt(response) {
     fees: response.fees ?? null,
     grandTotal: response.grandTotal ?? null,
     confidence: response.confidence || "medium",
+    totalTrustScore: response.grandTotal != null && response?.reconciliation?.mathCheckPassed ? 1 : 0,
+    blockers: response.grandTotal != null && response?.reconciliation?.mathCheckPassed ? [] : ["full_receipt_total_not_exact"],
     totalLabel: response.grandTotal != null ? "grandTotal" : null,
     notes: response.notes || null,
   };
@@ -1004,22 +1013,52 @@ function classifyReceiptUpload({ ocrText, parsed }) {
     /\b(?:visa|mastercard|amex|discover)\b/,
     /\bauth\s*(?:code|#)\b/,
   ];
-  const statementSignals = /\b(statement period|opening balance|closing balance|account number|account summary|statement date|new balance|minimum payment|payment due|available credit|transaction history|account activity)\b/.test(text);
+  const statementStructure = /\b(statement period|opening balance|closing balance|account summary|statement date|new balance)\b/.test(text);
+  const cardStructure = /\b(minimum payment|payment due|available credit|statement balance|credit line|purchase apr)\b/.test(text);
+  const activityStructure = /\b(account activity|transaction history|payments and other credits|debits and credits)\b/.test(text);
+  const accountIdentity = /\b(account number|account ending|cardmember|member number)\b/.test(text);
+  const datedTransactionRows = String(ocrText || "").split(/\r?\n/).filter(line =>
+    /\b(?:\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s+\d{1,2})\b/i.test(line)
+      && /\$?[-+]?\d{1,3}(?:,\d{3})*\.\d{2}/.test(line)
+  ).length;
+  const strongBankEvidence = (statementStructure && (accountIdentity || datedTransactionRows >= 2))
+    || (cardStructure && (activityStructure || datedTransactionRows >= 2))
+    || (activityStructure && accountIdentity && datedTransactionRows >= 2);
   const receiptSignalCount = receiptSignals.reduce((count, regex) => count + (regex.test(text) ? 1 : 0), 0);
-  const itemCount = Array.isArray(parsed?.items) ? parsed.items.length : 0;
-  const hasVisibleTotal = parsed?.grandTotal != null || parsed?.subtotal != null || /\b(?:grand\s+total|total|amount\s+due|balance\s+due)\b/.test(text);
+  const credibleItems = (Array.isArray(parsed?.items) ? parsed.items : []).filter(item => {
+    const name = safeString(item?.itemName || item?.name || item?.description || "").trim();
+    const amount = toNumber(item?.printedItemValue ?? item?.itemValue ?? item?.amount ?? item?.printedAmount);
+    return name.length >= 2 && amount != null && amount > 0 && !isLikelyNonItemRow(name)
+      && !/\b(?:debit|credit|withdrawal|deposit|transfer|payment posted|balance)\b/i.test(name);
+  });
+  const itemCount = credibleItems.length;
+  const merchant = safeString(parsed?.merchantName || parsed?.merchant || "").trim();
+  const canonicalTotal = receiptGrandTotal(parsed);
+  const plausibleStructuredTotal = canonicalTotal != null && canonicalTotal > 0 && canonicalTotal <= 25_000;
+  const strongStructuredReceipt = merchant.length >= 2 && plausibleStructuredTotal && itemCount >= 1;
+  const hasVisibleTotal = canonicalTotal != null || parsed?.subtotal != null || /\b(?:grand\s+total|total|amount\s+due|balance\s+due)\b/.test(text);
   const terminalAmountLineCount = String(ocrText || "")
     .split(/\r?\n/)
     .map(cleanOcrLine)
     .filter(line => lastAmountNearLineEnd(line) && !summaryRoleForLine(line) && !isReceiptMetadataLine(line))
     .length;
 
-  if (statementSignals) {
+  if (strongBankEvidence) {
     return {
       ok: false,
       code: "NOT_A_RECEIPT",
       confidence: 0.2,
-      reason: "Statement or account-activity text was detected, not a receipt.",
+      classification: "bank_document",
+      reason: "Strong statement/account structure with transaction evidence was detected, not purchased merchandise.",
+    };
+  }
+
+  if (strongStructuredReceipt) {
+    return {
+      ok: true,
+      classification: receiptSignalCount > 0 ? "receipt" : "unconventional_receipt",
+      confidence: itemCount >= 2 ? 0.97 : 0.93,
+      reason: "Structured merchant, canonical total, and credible purchased item evidence were extracted.",
     };
   }
 
@@ -1043,15 +1082,17 @@ function classifyReceiptUpload({ ocrText, parsed }) {
     return { ok: true, confidence: 0.74, reason: "Receipt-like item-price rows and a visible total were detected without relying on a fixed template." };
   }
 
-  if (hasVisibleTotal && amountCount >= 2 && words.length >= 8 && !statementSignals) {
+  if (hasVisibleTotal && amountCount >= 1 && words.length >= 5) {
     return {
       ok: true,
+      classification: "needs_review",
+      needsReview: true,
       confidence: 0.62,
       reason: "Weak but plausible receipt evidence was detected; parse as review-required instead of rejecting the upload.",
     };
   }
 
-  if (words.length < 8 || (receiptSignalCount === 0 && terminalAmountLineCount < 3)) {
+  if (!hasVisibleTotal && (words.length < 8 || (receiptSignalCount === 0 && terminalAmountLineCount < 3))) {
     return {
       ok: false,
       code: "NOT_A_RECEIPT",
@@ -1061,10 +1102,11 @@ function classifyReceiptUpload({ ocrText, parsed }) {
   }
 
   return {
-    ok: false,
-    code: "NOT_A_RECEIPT",
+    ok: true,
+    classification: "needs_review",
+    needsReview: true,
     confidence: 0.45,
-    reason: "The upload did not contain enough receipt evidence to safely parse financial values.",
+    reason: "Some receipt-like evidence was detected, but the extraction requires review.",
   };
 }
 
@@ -2406,7 +2448,7 @@ function visibleGrandTotalCandidatesFromOcr(ocrText) {
     .slice(0, 5);
 }
 
-function buildExtractionDiagnostics({ ocrText = "", result = null, parsed = null, reconciliation = null, rejected = null, uploadDiagnostics = null } = {}) {
+function buildExtractionDiagnostics({ ocrText = "", result = null, parsed = null, reconciliation = null, rejected = null, uploadDiagnostics = null, candidateSelection = null, receiptClassification = null } = {}) {
   const rawAnnotation = rawDocumentAnnotationObject(result?.documentAnnotation);
   const annotationItemCount = Array.isArray(rawAnnotation?.items) ? rawAnnotation.items.length : 0;
   const normalizedItemCount = Array.isArray(parsed?.items) ? parsed.items.length : 0;
@@ -2442,6 +2484,9 @@ function buildExtractionDiagnostics({ ocrText = "", result = null, parsed = null
     annotationGrandTotal,
     normalizedGrandTotal,
     totalLossLayer,
+    selectedCandidateSource: candidateSelection?.extractionSource || null,
+    receiptClassification: receiptClassification?.classification || null,
+    classificationNeedsReview: Boolean(receiptClassification?.needsReview),
     upload: uploadDiagnostics,
   };
 }
@@ -3191,7 +3236,34 @@ async function callMistralOCR(imageBuffer, mimeType, reqId, options = {}) {
   return { parsed, ocrText: ocr.ocrText, result: ocr.result, ocr };
 }
 
-function normalizeQuickTotal(raw) {
+function normalizeQuickTotal(raw, ocrText = "") {
+  const grandTotal = toNumber(raw?.grandTotal);
+  const totalLabel = safeString(raw?.totalLabel || "").trim();
+  const explicitTotalLabel = /\b(?:grand\s+total|total\s+due|amount\s+due|balance\s+due|total\s+charged|total)\b/i.test(totalLabel);
+  const subtotalLabel = /\bsubtotal\b/i.test(totalLabel);
+  const visibleCandidates = visibleGrandTotalCandidatesFromOcr(ocrText);
+  const matchingVisibleCandidates = grandTotal == null
+    ? []
+    : visibleCandidates.filter(candidate => Math.abs(candidate.amount - grandTotal) <= 0.01);
+  const distinctVisibleTotals = new Set(visibleCandidates.map(candidate => Number(candidate.amount).toFixed(2)));
+  const blockers = [];
+  if (!(grandTotal > 0) || grandTotal > 25_000) blockers.push("implausible_or_missing_total");
+  if (!explicitTotalLabel || subtotalLabel) blockers.push("missing_explicit_final_total_label");
+  if (distinctVisibleTotals.size > 1 && matchingVisibleCandidates.length !== visibleCandidates.length) {
+    blockers.push("ambiguous_multiple_total_candidates");
+  }
+  if (visibleCandidates.length > 0 && matchingVisibleCandidates.length === 0) blockers.push("ocr_annotation_total_disagreement");
+
+  // Application trust score from deterministic evidence, not a calibrated
+  // probability supplied by the model.
+  let totalTrustScore = 0;
+  if (grandTotal > 0 && grandTotal <= 25_000) totalTrustScore += 0.45;
+  if (explicitTotalLabel && !subtotalLabel) totalTrustScore += 0.25;
+  if (matchingVisibleCandidates.length > 0) totalTrustScore += 0.20;
+  if (raw?.confidence === "high") totalTrustScore += 0.10;
+  else if (raw?.confidence === "medium") totalTrustScore += 0.05;
+  totalTrustScore = Math.min(1, round2(totalTrustScore));
+
   return {
     merchant: raw?.merchant || null,
     receiptDate: raw?.receiptDate || null,
@@ -3201,9 +3273,12 @@ function normalizeQuickTotal(raw) {
     tip: toNumber(raw?.tip),
     fees: toNumber(raw?.fees),
     orderLevelDiscount: toNumber(raw?.orderLevelDiscount),
-    grandTotal: toNumber(raw?.grandTotal),
+    grandTotal,
     confidence: raw?.confidence || "medium",
     totalLabel: raw?.totalLabel || null,
+    totalTrustScore,
+    blockers,
+    publishable: totalTrustScore >= 0.90 && blockers.length === 0,
     notes: raw?.notes || null,
   };
 }
@@ -3219,7 +3294,7 @@ async function callMistralQuickTotal(imageBuffer, mimeType, reqId) {
   });
   const parsed = parseAndValidateDocumentAnnotation(ocr.documentAnnotation, QuickReceiptTotalSchema);
   return {
-    quickTotal: normalizeQuickTotal(parsed),
+    quickTotal: normalizeQuickTotal(parsed, ocr.ocrText),
     ocrText: ocr.ocrText,
     result: ocr.result,
   };
@@ -3246,6 +3321,13 @@ async function parseFullReceiptResponse(buffer, mimeType, reqId, options = {}) {
   let { parsed, ocrText, result, ocr } = await callMistralOCR(buffer, mimeType, reqId, options);
   const candidateSelection = selectMistralReceiptCandidate(parsed, ocrText, reqId);
   parsed = candidateSelection.parsed;
+  const receiptClassification = classifyReceiptUpload({ ocrText, parsed });
+  if (!receiptClassification.ok) {
+    const error = new Error(receiptClassification.reason || "The upload is not a receipt.");
+    error.code = receiptClassification.code || "NOT_A_RECEIPT";
+    error.classification = receiptClassification;
+    throw error;
+  }
   timings.ocr_ms = Date.now() - ocrStart;
   timings.mistral_ocr_ms = timings.ocr_ms;
   timings.backend_mistral_request_prepare_ms = ocr?.requestPrepareMs || 0;
@@ -3306,7 +3388,7 @@ async function parseFullReceiptResponse(buffer, mimeType, reqId, options = {}) {
   timings.total_until_final_ms = timings.total_ms;
 
   return buildApiResponse(
-    { parsed: normalized, ocrText, result, reconciliation, rejected: [], resolutionResult, uploadDiagnostics: options.uploadDiagnostics || null },
+    { parsed: normalized, ocrText, result, reconciliation, rejected: [], resolutionResult, uploadDiagnostics: options.uploadDiagnostics || null, candidateSelection, receiptClassification },
     timings,
     reqId
   );
@@ -4372,8 +4454,8 @@ function logCanonicalReceipt(receipt, reconciliation, reqId) {
 }
 
 function buildApiResponse(parseResult, timings, reqId) {
-  const { parsed, ocrText, result, reconciliation, rejected, resolutionResult, uploadDiagnostics } = parseResult;
-  const extractionDiagnostics = buildExtractionDiagnostics({ ocrText, result, parsed, reconciliation, rejected, uploadDiagnostics });
+  const { parsed, ocrText, result, reconciliation, rejected, resolutionResult, uploadDiagnostics, candidateSelection, receiptClassification } = parseResult;
+  const extractionDiagnostics = buildExtractionDiagnostics({ ocrText, result, parsed, reconciliation, rejected, uploadDiagnostics, candidateSelection, receiptClassification });
 
   if (!parsed) {
     return {
@@ -4619,6 +4701,7 @@ app.post("/parse-receipt-staged", requireAppAuth, receiptMultipartMiddleware, as
       clientByteCount,
       serverSha256,
       requestMetrics,
+      needsQuickTotal,
     } = upload;
     const mode = upload.mode === "unknown" ? "staged" : upload.mode;
     const uploadValidation = validateUploadBuffer(buffer, mimeType);
@@ -4677,6 +4760,7 @@ app.post("/parse-receipt-staged", requireAppAuth, receiptMultipartMiddleware, as
       quickTotal: null,
       result: null,
       error: null,
+      needsQuickTotal,
       timings: {
         decode_ms: decodeMs,
         ...requestMetrics,
@@ -4757,7 +4841,7 @@ app.post("/parse-receipt-staged", requireAppAuth, receiptMultipartMiddleware, as
         });
       });
 
-    if (ENABLE_STAGED_QUICK_TOTAL) {
+    if (ENABLE_STAGED_QUICK_TOTAL && needsQuickTotal) {
       const quickStartedAt = Date.now();
       const quickPromise = callMistralQuickTotal(buffer, safeMimeType, `${reqId}_total`)
         .then(quick => {
@@ -4771,6 +4855,8 @@ app.post("/parse-receipt-staged", requireAppAuth, receiptMultipartMiddleware, as
               processing_time_ms: job.timings.quick_total_ms,
               grand_total_found: job.quickTotal?.grandTotal != null,
               confidence: job.quickTotal?.confidence,
+              total_trust_score: job.quickTotal?.totalTrustScore,
+              blocker_count: job.quickTotal?.blockers?.length || 0,
             },
           });
         })
@@ -4793,6 +4879,8 @@ app.post("/parse-receipt-staged", requireAppAuth, receiptMultipartMiddleware, as
       // Quick-total extraction is optional background work. The client already
       // has local provisional values and should never wait here for another model.
       void quickPromise;
+    } else {
+      console.log(`[${reqId}] Staged quick total skipped: master_enabled=${ENABLE_STAGED_QUICK_TOTAL} request_needs_quick_total=${needsQuickTotal}`);
     }
 
     job.timings.staged_initial_response_ms = Date.now() - startedAt;
@@ -5006,6 +5094,7 @@ app.post("/parse-receipt", requireAppAuth, receiptMultipartMiddleware, async (re
       uploadDiagnostics,
     });
     const candidateSelection = selectMistralReceiptCandidate(parsed, ocrText, reqId);
+    parsed = candidateSelection.parsed;
     timings.ocr_ms = Date.now() - ocrStart;
     timings.mistral_ocr_ms = timings.ocr_ms;
     timings.backend_mistral_request_prepare_ms = ocr?.requestPrepareMs || 0;
@@ -5021,7 +5110,7 @@ app.post("/parse-receipt", requireAppAuth, receiptMultipartMiddleware, async (re
       },
     });
 
-    const receiptClassification = classifyReceiptUpload({ ocrText, parsed: parsed || candidateSelection.fallback });
+    const receiptClassification = classifyReceiptUpload({ ocrText, parsed });
     console.log(`[${reqId}] Receipt classification: ${receiptClassification.ok ? "receipt" : "reject"} confidence=${receiptClassification.confidence} reason=${receiptClassification.reason}`);
     if (!receiptClassification.ok) {
       timings.total_ms = Date.now() - startedAt;
@@ -5060,7 +5149,6 @@ app.post("/parse-receipt", requireAppAuth, receiptMultipartMiddleware, async (re
       allCandidates: [],
     };
     
-    parsed = candidateSelection.parsed;
     if (parsed) {
       trackAnalyticsEvent({
         ...analyticsContext,
@@ -5151,7 +5239,7 @@ app.post("/parse-receipt", requireAppAuth, receiptMultipartMiddleware, async (re
     console.log(`[${reqId}]   - Total: ${timings.total_ms}ms`);
 
     const response = buildApiResponse(
-      { parsed: normalized, ocrText, result, reconciliation, rejected, resolutionResult, uploadDiagnostics },
+      { parsed: normalized, ocrText, result, reconciliation, rejected, resolutionResult, uploadDiagnostics, candidateSelection, receiptClassification },
       timings,
       reqId
     );
@@ -5831,6 +5919,7 @@ export {
   buildReceiptFromMistralOcrText,
   buildUploadDiagnostics,
   callMistralOCR,
+  classifyReceiptUpload,
   compactAppleOcrText,
   compactLocalParseResult,
   detectMimeType,
@@ -5842,6 +5931,7 @@ export {
   isLikelyNonItemRow,
   isLikelySuggestedTipRowText,
   normalizeAnalyticsFailureReason,
+  normalizeQuickTotal,
   normalizeParsedReceipt,
   receiptMultipartMiddleware,
   preserveAnnotationGrandTotal,
