@@ -2406,8 +2406,11 @@ function visibleGrandTotalCandidatesFromOcr(ocrText) {
     .slice(0, 5);
 }
 
-function buildExtractionDiagnostics({ ocrText = "", result = null, parsed = null, reconciliation = null, uploadDiagnostics = null } = {}) {
+function buildExtractionDiagnostics({ ocrText = "", result = null, parsed = null, reconciliation = null, rejected = null, uploadDiagnostics = null } = {}) {
   const rawAnnotation = rawDocumentAnnotationObject(result?.documentAnnotation);
+  const annotationItemCount = Array.isArray(rawAnnotation?.items) ? rawAnnotation.items.length : 0;
+  const normalizedItemCount = Array.isArray(parsed?.items) ? parsed.items.length : 0;
+  const rejectedItemCount = Array.isArray(rejected) ? rejected.length : 0;
   const annotationGrandTotal = annotationGrandTotalValue(rawAnnotation);
   const normalizedGrandTotal = toNumber(parsed?.grandTotal);
   const ocrGrandTotalCandidates = visibleGrandTotalCandidatesFromOcr(ocrText);
@@ -2433,6 +2436,9 @@ function buildExtractionDiagnostics({ ocrText = "", result = null, parsed = null
     ocrTextLength: String(ocrText || "").length,
     ocrGrandTotalCandidates,
     annotationPresent: rawAnnotation != null,
+    annotationItemCount,
+    normalizedItemCount,
+    rejectedItemCount,
     annotationGrandTotal,
     normalizedGrandTotal,
     totalLossLayer,
@@ -4367,7 +4373,7 @@ function logCanonicalReceipt(receipt, reconciliation, reqId) {
 
 function buildApiResponse(parseResult, timings, reqId) {
   const { parsed, ocrText, result, reconciliation, rejected, resolutionResult, uploadDiagnostics } = parseResult;
-  const extractionDiagnostics = buildExtractionDiagnostics({ ocrText, result, parsed, reconciliation, uploadDiagnostics });
+  const extractionDiagnostics = buildExtractionDiagnostics({ ocrText, result, parsed, reconciliation, rejected, uploadDiagnostics });
 
   if (!parsed) {
     return {
