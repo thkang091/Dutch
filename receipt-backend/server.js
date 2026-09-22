@@ -67,6 +67,10 @@ const MISTRAL_OCR_TIMEOUT_MS = Number(
 );
 const QUICK_TOTAL_TIMEOUT_MS = Number(process.env.QUICK_TOTAL_TIMEOUT_MS || 5000);
 const ENABLE_STAGED_QUICK_TOTAL = process.env.ENABLE_STAGED_QUICK_TOTAL === "true";
+// Document annotation is performed by a vision-capable model after OCR. Keep
+// request starts below the organization's 1 request/second model allowance,
+// even when quick-total and full-itemization work are launched together.
+const MISTRAL_MIN_REQUEST_INTERVAL_MS = Number(process.env.MISTRAL_MIN_REQUEST_INTERVAL_MS || 1100);
 const ENABLE_MISTRAL_WORD_CONFIDENCE = process.env.ENABLE_MISTRAL_WORD_CONFIDENCE === "true";
 const ENABLE_MISTRAL_OCR_DEBUG =
   process.env.ENABLE_MISTRAL_OCR_DEBUG === "true" || ENABLE_DEBUG_RESPONSE;
@@ -97,6 +101,90 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 if (SAVE_TEMP_RECEIPTS) fs.mkdirSync(TEMP_DIR, { recursive: true });
 
 const client = new Mistral({ apiKey: MISTRAL_API_KEY });
+let mistralStartReservation = Promise.resolve();
+let nextMistralRequestStartAt = 0;
+
+async function reserveMistralRequestStart(reqId, operation) {
+  let releaseReservation;
+  const previousReservation = mistralStartReservation;
+  mistralStartReservation = new Promise(resolve => { releaseReservation = resolve; });
+  await previousReservation;
+
+  const waitMs = Math.max(0, nextMistralRequestStartAt - Date.now());
+  if (waitMs > 0) {
+    console.log(`[${reqId}] Mistral request paced operation=${operation} wait_ms=${waitMs}`);
+    await new Promise(resolve => setTimeout(resolve, waitMs));
+  }
+  nextMistralRequestStartAt = Date.now() + MISTRAL_MIN_REQUEST_INTERVAL_MS;
+  releaseReservation();
+}
+
+function mistralErrorDiagnostic(error, operation, reqId) {
+  const headers = error?.headers;
+  const header = name => {
+    try { return headers?.get?.(name) || null; } catch { return null; }
+  };
+  const statusCode = Number(error?.statusCode) || null;
+  const body = safeString(error?.body || "").slice(0, 4000) || null;
+  const diagnostic = {
+    provider: "mistral",
+    endpoint: "/v1/ocr",
+    operation,
+    model: MISTRAL_OCR_MODEL,
+    statusCode,
+    code: error?.code || (statusCode === 429 ? "MISTRAL_RATE_LIMITED" : "MISTRAL_REQUEST_FAILED"),
+    message: safeString(error?.message || "Mistral request failed."),
+    body,
+    retryAfter: header("retry-after"),
+    providerRequestId: header("x-request-id") || header("request-id") || header("x-mistral-request-id"),
+    rateLimitLimit: header("x-ratelimit-limit"),
+    rateLimitRemaining: header("x-ratelimit-remaining"),
+    rateLimitReset: header("x-ratelimit-reset"),
+    requestId: reqId,
+  };
+  console.error(`[${reqId}] Mistral provider error ${JSON.stringify(diagnostic)}`);
+  return diagnostic;
+}
+
+function mistralRetryAfterMs(error) {
+  let raw = null;
+  try { raw = error?.headers?.get?.("retry-after") || null; } catch {}
+  if (!raw) return MISTRAL_MIN_REQUEST_INTERVAL_MS;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds)) return Math.max(MISTRAL_MIN_REQUEST_INTERVAL_MS, seconds * 1000);
+  const date = Date.parse(raw);
+  return Number.isFinite(date)
+    ? Math.max(MISTRAL_MIN_REQUEST_INTERVAL_MS, date - Date.now())
+    : MISTRAL_MIN_REQUEST_INTERVAL_MS;
+}
+
+async function processMistralOcrWithPacing(ocrRequest, timeoutMs, reqId, operation) {
+  const deadline = Date.now() + timeoutMs;
+  let attempt = 0;
+  while (attempt < 3) {
+    attempt += 1;
+    await reserveMistralRequestStart(reqId, operation);
+    const remainingMs = deadline - Date.now();
+    if (remainingMs < 1000) {
+      const timeout = new Error(`Mistral OCR timed out after ${timeoutMs}ms`);
+      timeout.code = "MISTRAL_TIMEOUT";
+      throw timeout;
+    }
+    try {
+      return await client.ocr.process(ocrRequest, {
+        timeoutMs: remainingMs,
+        retries: { strategy: "none" },
+      });
+    } catch (error) {
+      const mayRetry = error?.statusCode === 429 && attempt < 3;
+      const retryWaitMs = mistralRetryAfterMs(error);
+      if (!mayRetry || Date.now() + retryWaitMs + 1000 >= deadline) throw error;
+      console.warn(`[${reqId}] Mistral 429 operation=${operation} attempt=${attempt} retry_in_ms=${retryWaitMs}`);
+      await new Promise(resolve => setTimeout(resolve, retryWaitMs));
+    }
+  }
+  throw new Error("Mistral OCR retry budget exhausted");
+}
 
 console.log("\n" + "=".repeat(80));
 console.log("  PRODUCTION RECEIPT PARSER - MISTRAL OCR SINGLE PASS");
@@ -3155,7 +3243,12 @@ async function runMistralOcr({
   documentAnnotationPrompt,
   timeoutMs = MISTRAL_OCR_TIMEOUT_MS,
 }) {
-  console.log(`[${reqId}] Calling Mistral OCR (${mimeType})...`);
+  const operation = reqId.endsWith("_total")
+    ? "receipt_quick_total"
+    : reqId.endsWith("_items")
+      ? "receipt_itemization"
+      : "document_ocr";
+  console.log(`[${reqId}] Calling Mistral OCR (${mimeType}) operation=${operation}...`);
 
   const requestPrepareStartedAt = Date.now();
   const ocrRequest = {
@@ -3172,16 +3265,16 @@ async function runMistralOcr({
   }
   const requestPrepareMs = Date.now() - requestPrepareStartedAt;
 
-  // `timeoutMs` gives the SDK an AbortSignal, so an expired request actually
-  // releases the socket. `withTimeout` alone could not do that — it raced a
-  // promise and walked away, leaving the upload running against Mistral with
-  // nobody waiting for it. The outer race stays as a backstop, set slightly
-  // later so the abort is what normally fires.
-  const result = await withTimeout(
-    client.ocr.process(ocrRequest, { timeoutMs }),
-    timeoutMs + 2000,
-    "Mistral OCR"
-  );
+  let result;
+  try {
+    result = await processMistralOcrWithPacing(ocrRequest, timeoutMs, reqId, operation);
+  } catch (error) {
+    const wrapped = new Error(safeString(error?.message || "Mistral request failed."), { cause: error });
+    wrapped.statusCode = Number(error?.statusCode) || null;
+    wrapped.code = error?.statusCode === 429 ? "MISTRAL_RATE_LIMITED" : (error?.code || "MISTRAL_REQUEST_FAILED");
+    wrapped.providerDiagnostic = mistralErrorDiagnostic(error, operation, reqId);
+    throw wrapped;
+  }
   console.log(`[${reqId}] Mistral OCR model requested=${MISTRAL_OCR_MODEL} returned=${result?.model || "unknown"}`);
 
   const pages = result.pages || [];
@@ -4825,6 +4918,7 @@ app.post("/parse-receipt-staged", requireAppAuth, receiptMultipartMiddleware, as
         job.error = {
           code: error?.code || "ITEMIZATION_FAILED",
           message: safeString(error?.message || "Receipt itemization failed."),
+          provider: error?.providerDiagnostic || null,
         };
         job.timings.itemization_ms = Date.now() - itemizationStartedAt;
         job.timings.total_until_final_ms = Date.now() - startedAt;
@@ -4865,6 +4959,7 @@ app.post("/parse-receipt-staged", requireAppAuth, receiptMultipartMiddleware, as
           job.quickTotalError = {
             code: error?.code || "QUICK_TOTAL_FAILED",
             message: safeString(error?.message || "Quick total extraction failed."),
+            provider: error?.providerDiagnostic || null,
           };
           trackAnalyticsEvent({
             ...analyticsContext,
@@ -5278,7 +5373,8 @@ app.post("/parse-receipt", requireAppAuth, receiptMultipartMiddleware, async (re
     console.error(`[${reqId}] ✗ ERROR:`, error);
     const statusCode = error instanceof ReceiptUploadError
       ? error.status
-      : error?.code === "MISTRAL_TIMEOUT" ? 504 : 500;
+      : error?.statusCode === 429 || error?.code === "MISTRAL_RATE_LIMITED" ? 429
+        : error?.code === "MISTRAL_TIMEOUT" ? 504 : 500;
     trackAnalyticsEvent({
       ...analyticsContext,
       event_name: error?.message?.toLowerCase().includes("ocr") ? "receipt_ocr_failed" : "receipt_parse_failed",
@@ -5294,6 +5390,7 @@ app.post("/parse-receipt", requireAppAuth, receiptMultipartMiddleware, async (re
       error: "Failed to parse receipt",
       detail: error?.message || "unknown_error",
       code: error?.code || "UNKNOWN_PARSE_ERROR",
+      provider: error?.providerDiagnostic || null,
       request_id: reqId,
       timings,
     });
